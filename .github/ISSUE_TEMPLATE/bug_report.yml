@@ -1,0 +1,56 @@
+name: Bug report
+description: Something isn't working
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. If the **hotkey** is the problem, please run
+        `FlowType.exe --keylog`, press your hotkey a few times within the 20
+        second window, and paste `%APPDATA%\FlowType\keylog.txt` below — that
+        file usually identifies the cause immediately.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ...
+        2. ...
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: FlowType version
+      description: Shown under Settings → About
+    validations:
+      required: true
+
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version
+      placeholder: "Windows 11 23H2"
+
+  - type: input
+    id: keyboard
+    attributes:
+      label: Keyboard / mouse software
+      description: G HUB, Synapse, PowerToys, AutoHotkey, RDP, KVM… (relevant for hotkey issues)
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Output of `--selftest` and/or `--keylog`, if relevant.
+      render: text

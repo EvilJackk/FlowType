@@ -1,0 +1,26 @@
+name: Feature request
+description: Suggest an idea for FlowType
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What's the problem?
+      description: What are you trying to do that FlowType makes hard today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like it to do?
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: local
+    attributes:
+      label: Constraint check
+      options:
+        - label: This works without sending audio or text off the device
+          required: true

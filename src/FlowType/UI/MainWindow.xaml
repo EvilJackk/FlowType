@@ -1,0 +1,359 @@
+<Window x:Class="FlowType.UI.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="FlowType"
+        Width="1010" Height="720"
+        MinWidth="860" MinHeight="600"
+        WindowStartupLocation="CenterScreen"
+        Background="{StaticResource BgBrush}"
+        FontFamily="{StaticResource BodyFont}">
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="222"/>
+            <ColumnDefinition Width="*"/>
+        </Grid.ColumnDefinitions>
+
+        <!-- ======= Sidebar ======= -->
+        <Border Background="{StaticResource SidebarBrush}">
+            <DockPanel>
+                <StackPanel DockPanel.Dock="Top" Orientation="Horizontal" Margin="22,24,18,30">
+                    <Image Source="/Resources/logo.png" Width="30" Height="30"/>
+                    <TextBlock Text="FlowType" FontSize="20" FontWeight="SemiBold"
+                               FontFamily="{StaticResource DisplayFont}"
+                               Foreground="{StaticResource TextBrush}"
+                               Margin="10,0,0,0" VerticalAlignment="Center"/>
+                </StackPanel>
+
+                <TextBlock DockPanel.Dock="Bottom" x:Name="StatusFooter"
+                           Margin="22,0,18,18" FontSize="11" LineHeight="16"
+                           Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap"/>
+
+                <StackPanel>
+                    <RadioButton x:Name="NavHome" Style="{StaticResource NavItem}"
+                                 Content="Home" IsChecked="True" Checked="Nav_Checked"/>
+                    <RadioButton x:Name="NavNotes" Style="{StaticResource NavItem}"
+                                 Content="Notes" Checked="Nav_Checked"/>
+                    <RadioButton x:Name="NavDictionary" Style="{StaticResource NavItem}"
+                                 Content="Dictionary" Checked="Nav_Checked"/>
+                    <RadioButton x:Name="NavSettings" Style="{StaticResource NavItem}"
+                                 Content="Settings" Checked="Nav_Checked"/>
+                </StackPanel>
+            </DockPanel>
+        </Border>
+
+        <!-- ======= Content ======= -->
+        <ScrollViewer Grid.Column="1" VerticalScrollBarVisibility="Auto" Padding="30,26,30,26">
+            <Grid>
+
+                <!-- ============ HOME ============ -->
+                <StackPanel x:Name="HomePanel">
+                    <TextBlock x:Name="GreetingText" Style="{StaticResource PageTitle}"
+                               Text="Good evening" Margin="0,0,0,4"/>
+                    <TextBlock x:Name="HomeHintText" Style="{StaticResource Hint}"
+                               Margin="0,0,0,18" FontSize="13"/>
+
+                    <UniformGrid Columns="4" Margin="0,0,0,4">
+                        <Border Style="{StaticResource Card}" Margin="0,0,12,14">
+                            <StackPanel>
+                                <TextBlock x:Name="StatWords" Text="0" FontSize="26" FontWeight="SemiBold"
+                                           FontFamily="{StaticResource DisplayFont}"
+                                           Foreground="{StaticResource TextBrush}"/>
+                                <TextBlock Text="words dictated" Style="{StaticResource Hint}" Margin="0,4,0,0"/>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource Card}" Margin="0,0,12,14">
+                            <StackPanel>
+                                <TextBlock x:Name="StatWpm" Text="—" FontSize="26" FontWeight="SemiBold"
+                                           FontFamily="{StaticResource DisplayFont}"
+                                           Foreground="{StaticResource TextBrush}"/>
+                                <TextBlock Text="speaking pace (wpm)" Style="{StaticResource Hint}" Margin="0,4,0,0"/>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource Card}" Margin="0,0,12,14">
+                            <StackPanel>
+                                <TextBlock x:Name="StatStreak" Text="0" FontSize="26" FontWeight="SemiBold"
+                                           FontFamily="{StaticResource DisplayFont}"
+                                           Foreground="{StaticResource TextBrush}"/>
+                                <TextBlock Text="day streak" Style="{StaticResource Hint}" Margin="0,4,0,0"/>
+                            </StackPanel>
+                        </Border>
+                        <Border Style="{StaticResource Card}" Margin="0,0,0,14">
+                            <StackPanel>
+                                <TextBlock x:Name="StatTopApp" Text="—" FontSize="26" FontWeight="SemiBold"
+                                           FontFamily="{StaticResource DisplayFont}"
+                                           Foreground="{StaticResource TextBrush}"
+                                           TextTrimming="CharacterEllipsis"/>
+                                <TextBlock Text="top app" Style="{StaticResource Hint}" Margin="0,4,0,0"/>
+                            </StackPanel>
+                        </Border>
+                    </UniformGrid>
+
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource SectionTitle}" Text="Try it right here"/>
+                            <TextBlock x:Name="TryHintText" Style="{StaticResource Hint}" Margin="0,6,0,10"/>
+                            <TextBox x:Name="PracticeBox" Height="110" AcceptsReturn="True"
+                                     TextWrapping="Wrap" VerticalContentAlignment="Top"
+                                     VerticalScrollBarVisibility="Auto"/>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource Card}">
+                        <DockPanel>
+                            <StackPanel DockPanel.Dock="Right" Orientation="Horizontal"
+                                        VerticalAlignment="Center">
+                                <Button Style="{StaticResource GhostButton}" Content="Change model"
+                                        Click="GoToSettings_Click"/>
+                            </StackPanel>
+                            <StackPanel>
+                                <TextBlock Style="{StaticResource SectionTitle}" Text="Engine"/>
+                                <TextBlock x:Name="EngineStatusText" Style="{StaticResource Hint}"
+                                           Margin="0,6,0,0" FontSize="12.5"/>
+                            </StackPanel>
+                        </DockPanel>
+                    </Border>
+                </StackPanel>
+
+                <!-- ============ NOTES ============ -->
+                <StackPanel x:Name="NotesPanel" Visibility="Collapsed">
+                    <DockPanel Margin="0,0,0,4">
+                        <Button DockPanel.Dock="Right" Style="{StaticResource DangerButton}"
+                                Content="Clear all" VerticalAlignment="Top" Click="ClearNotes_Click"/>
+                        <Button DockPanel.Dock="Right" Style="{StaticResource GhostButton}"
+                                Content="Export…" VerticalAlignment="Top" Margin="0,0,8,0"
+                                Click="ExportNotes_Click"/>
+                        <TextBlock Style="{StaticResource PageTitle}" Text="Notes"/>
+                    </DockPanel>
+                    <TextBox x:Name="NotesSearchBox" Margin="0,0,0,14"
+                             TextChanged="NotesSearch_TextChanged"
+                             Tag="Search your dictations…"/>
+                    <TextBlock x:Name="NotesEmptyText" Style="{StaticResource Hint}" FontSize="13"
+                               Text="Everything you dictate lands here — nothing has yet."/>
+                    <StackPanel x:Name="NotesList"/>
+                </StackPanel>
+
+                <!-- ============ DICTIONARY ============ -->
+                <StackPanel x:Name="DictionaryPanel" Visibility="Collapsed">
+                    <TextBlock Style="{StaticResource PageTitle}" Text="Dictionary"/>
+                    <TextBlock Style="{StaticResource Hint}" FontSize="12.5" Margin="0,0,0,14"
+                               Text="Teach FlowType your words. Leave 'becomes' empty to simply teach a name or term (it biases recognition). Fill it in to create a rewrite: snippets like 'my email' → your address, or fixes like 'figjam' → 'FigJam'."/>
+
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="Auto"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBox x:Name="PhraseBox" Grid.Column="0" Tag="word or phrase"/>
+                                <TextBlock Grid.Column="1" Text="becomes" Style="{StaticResource Hint}"
+                                           VerticalAlignment="Center" Margin="12,0"/>
+                                <TextBox x:Name="ReplacementBox" Grid.Column="2"
+                                         Tag="(optional) replacement text"/>
+                                <Button Grid.Column="3" Style="{StaticResource AccentButton}"
+                                        Content="Add" Margin="12,0,0,0" Click="AddDictEntry_Click"/>
+                            </Grid>
+                            <CheckBox x:Name="WholeWordCheck" IsChecked="True" Margin="0,12,0,0"
+                                      Content="Match whole words only (recommended)"/>
+                        </StackPanel>
+                    </Border>
+
+                    <StackPanel x:Name="DictList"/>
+                </StackPanel>
+
+                <!-- ============ SETTINGS ============ -->
+                <StackPanel x:Name="SettingsPanel" Visibility="Collapsed">
+                    <TextBlock Style="{StaticResource PageTitle}" Text="Settings"/>
+
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource SectionTitle}" Text="Dictation"/>
+
+                            <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                                <TextBlock Style="{StaticResource FieldLabel}" Text="Hotkey"/>
+                                <ComboBox x:Name="HotkeyCombo" Width="210"
+                                          SelectionChanged="Setting_Changed"/>
+                                <Button x:Name="DetectKeyButton" Style="{StaticResource GhostButton}"
+                                        Content="Detect key…" Margin="10,0,0,0"
+                                        Click="DetectKey_Click"/>
+                            </StackPanel>
+                            <TextBlock x:Name="CaptureStatusText" Style="{StaticResource Hint}"
+                                       Margin="118,8,0,0"
+                                       Text="Key not responding? Click “Detect key…”, then press the key (or mouse button) you want — FlowType binds to whatever your keyboard actually sends."/>
+
+                            <StackPanel Orientation="Horizontal" Margin="118,12,0,0">
+                                <Ellipse x:Name="HotkeyStateDot" Width="10" Height="10"
+                                         Fill="#3A3648" VerticalAlignment="Center"/>
+                                <TextBlock x:Name="HotkeyStateText" Text="hotkey not pressed"
+                                           Style="{StaticResource Hint}" Margin="8,0,0,0"
+                                           VerticalAlignment="Center"/>
+                                <TextBlock x:Name="LastKeyText" Style="{StaticResource Hint}"
+                                           Margin="18,0,0,0" VerticalAlignment="Center"
+                                           Text="last key seen: —"/>
+                            </StackPanel>
+
+                            <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                                <TextBlock Style="{StaticResource FieldLabel}" Text="Activation"/>
+                                <StackPanel>
+                                    <RadioButton x:Name="ModeSmartRadio"
+                                                 Content="Smart — hold to talk, quick-tap for hands-free (recommended)"
+                                                 Checked="Setting_Changed"/>
+                                    <RadioButton x:Name="ModeHoldRadio" Margin="0,7,0,0"
+                                                 Content="Hold only (push-to-talk)"
+                                                 Checked="Setting_Changed"/>
+                                    <RadioButton x:Name="ModeToggleRadio" Margin="0,7,0,0"
+                                                 Content="Toggle only (press to start, press to stop)"
+                                                 Checked="Setting_Changed"/>
+                                </StackPanel>
+                            </StackPanel>
+
+                            <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                                <TextBlock Style="{StaticResource FieldLabel}" Text="Language"/>
+                                <ComboBox x:Name="LanguageCombo" Width="210"
+                                          SelectionChanged="Setting_Changed"/>
+                            </StackPanel>
+
+                            <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                                <TextBlock Style="{StaticResource FieldLabel}" Text="English style"/>
+                                <ComboBox x:Name="EnglishVariantCombo" Width="210"
+                                          SelectionChanged="Setting_Changed"/>
+                            </StackPanel>
+                            <TextBlock x:Name="VariantHintText" Style="{StaticResource Hint}"
+                                       Margin="118,6,0,0"
+                                       Text="British spelling (colour, realise, centre) or American (color, realize, center). Also nudges the AI toward that vocabulary."/>
+
+                            <TextBlock Style="{StaticResource Hint}" Margin="118,10,0,0"
+                                       Text="Esc always cancels a recording. In hold mode, pressing another key while holding cancels too (so Ctrl+C and friends still work normally)."/>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource SectionTitle}" Text="Microphone"/>
+                            <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                                <TextBlock Style="{StaticResource FieldLabel}" Text="Device"/>
+                                <ComboBox x:Name="MicCombo" Width="280" SelectionChanged="Setting_Changed"/>
+                                <Button Style="{StaticResource GhostButton}" Content="Refresh"
+                                        Margin="10,0,0,0" Click="RefreshMics_Click"/>
+                                <Button x:Name="MicTestButton" Style="{StaticResource GhostButton}"
+                                        Content="Test" Margin="10,0,0,0" Click="MicTest_Click"/>
+                            </StackPanel>
+                            <ProgressBar x:Name="MicLevelBar" Height="6" Margin="118,12,0,0"
+                                         Maximum="1" Width="380" HorizontalAlignment="Left"/>
+                            <CheckBox x:Name="SoundsCheck" Margin="0,14,0,0"
+                                      Content="Soft chime when recording starts and stops"
+                                      Checked="Setting_Changed" Unchecked="Setting_Changed"/>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <DockPanel>
+                                <Button DockPanel.Dock="Right" Style="{StaticResource GhostButton}"
+                                        Content="Open models folder" Click="OpenModelsFolder_Click"/>
+                                <TextBlock Style="{StaticResource SectionTitle}" Text="AI model"
+                                           VerticalAlignment="Center"/>
+                            </DockPanel>
+                            <TextBlock x:Name="ModelsStatusText" Style="{StaticResource Hint}"
+                                       Margin="0,8,0,12" FontSize="12.5"/>
+                            <StackPanel x:Name="ModelsList"/>
+                            <CheckBox x:Name="GpuCheck" Margin="0,6,0,0"
+                                      Content="Use GPU acceleration (Vulkan) — restart FlowType to apply"
+                                      Checked="Setting_Changed" Unchecked="Setting_Changed"/>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource SectionTitle}" Text="Output"/>
+                            <CheckBox x:Name="AutoInsertCheck" Margin="0,14,0,0"
+                                      Content="Insert text into the active app (otherwise copy to clipboard)"
+                                      Checked="Setting_Changed" Unchecked="Setting_Changed"/>
+                            <StackPanel Orientation="Horizontal" Margin="24,10,0,0">
+                                <RadioButton x:Name="PasteRadio" Content="Paste (fast, default)"
+                                             Checked="Setting_Changed"/>
+                                <RadioButton x:Name="TypeRadio" Content="Type it out (for paste-blocking apps)"
+                                             Margin="18,0,0,0" Checked="Setting_Changed"/>
+                            </StackPanel>
+                            <CheckBox x:Name="RestoreClipboardCheck" Margin="0,10,0,0"
+                                      Content="Restore previous clipboard contents after pasting"
+                                      Checked="Setting_Changed" Unchecked="Setting_Changed"/>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource SectionTitle}" Text="Formatting"/>
+                            <CheckBox x:Name="FillersCheck" Margin="0,14,0,0"
+                                      Content="Remove filler words (um, uh, erm)"
+                                      Checked="Setting_Changed" Unchecked="Setting_Changed"/>
+                            <CheckBox x:Name="ScratchCheck" Margin="0,10,0,0"
+                                      Content="“Scratch that” — keep only what you say after a correction"
+                                      Checked="Setting_Changed" Unchecked="Setting_Changed"/>
+                            <CheckBox x:Name="LineCmdCheck" Margin="0,10,0,0"
+                                      Content="“New line” / “new paragraph” insert line breaks"
+                                      Checked="Setting_Changed" Unchecked="Setting_Changed"/>
+                            <CheckBox x:Name="PunctCmdCheck" Margin="0,10,0,0"
+                                      Content="Spoken punctuation — “period”, “comma”, “question mark”…"
+                                      Checked="Setting_Changed" Unchecked="Setting_Changed"/>
+                            <CheckBox x:Name="SmartPunctCheck" Margin="0,10,0,0"
+                                      Content="No trailing period after emails, URLs, and numbers"
+                                      Checked="Setting_Changed" Unchecked="Setting_Changed"/>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource SectionTitle}" Text="Privacy"/>
+                            <CheckBox x:Name="SaveHistoryCheck" Margin="0,14,0,0"
+                                      Content="Save transcripts to Notes"
+                                      Checked="Setting_Changed" Unchecked="Setting_Changed"/>
+                            <TextBlock Style="{StaticResource Hint}" Margin="24,6,0,0"
+                                       Text="Off means nothing you dictate is ever written to disk — stats still count words. Audio is always temporary and deleted right after transcription."/>
+                            <CheckBox x:Name="PauseCheck" Margin="0,12,0,0"
+                                      Content="Pause dictation (ignore the hotkey until unchecked)"
+                                      Checked="Setting_Changed" Unchecked="Setting_Changed"/>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource SectionTitle}" Text="System"/>
+                            <CheckBox x:Name="StartupCheck" Margin="0,14,0,0"
+                                      Content="Launch FlowType when you sign in to Windows"
+                                      Checked="Setting_Changed" Unchecked="Setting_Changed"/>
+                            <CheckBox x:Name="ShowBarCheck" Margin="0,10,0,0"
+                                      Content="Keep the flow bar visible when idle"
+                                      Checked="Setting_Changed" Unchecked="Setting_Changed"/>
+                            <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                                <TextBlock Style="{StaticResource FieldLabel}" Text="Bar position"/>
+                                <ComboBox x:Name="BarPositionCombo" Width="180"
+                                          SelectionChanged="Setting_Changed"/>
+                            </StackPanel>
+                            <StackPanel Orientation="Horizontal" Margin="0,14,0,0">
+                                <TextBlock Style="{StaticResource FieldLabel}" Text="Max length"/>
+                                <ComboBox x:Name="MaxLengthCombo" Width="180"
+                                          SelectionChanged="Setting_Changed"/>
+                            </StackPanel>
+                            <TextBlock Style="{StaticResource Hint}" Margin="118,6,0,0"
+                                       Text="Safety cap for hands-free sessions, so a forgotten mic stops itself."/>
+                        </StackPanel>
+                    </Border>
+
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <TextBlock Style="{StaticResource SectionTitle}" Text="About"/>
+                            <TextBlock x:Name="AboutText" Style="{StaticResource Hint}"
+                                       Margin="0,8,0,0" FontSize="12.5"/>
+                            <TextBlock x:Name="CreditText" Style="{StaticResource Hint}"
+                                       Margin="0,6,0,0" FontSize="12.5"/>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+
+            </Grid>
+        </ScrollViewer>
+    </Grid>
+</Window>

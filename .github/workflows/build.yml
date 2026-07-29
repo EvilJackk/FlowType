@@ -1,0 +1,40 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore src/FlowType/FlowType.csproj
+
+      - name: Build
+        run: dotnet build src/FlowType/FlowType.csproj -c Release --no-restore
+
+      # Publishes the same way build/publish.ps1 does: self-contained, but with
+      # no single-file packing, compression, or trimming — see SECURITY.md.
+      - name: Publish
+        run: >
+          dotnet publish src/FlowType/FlowType.csproj -c Release -r win-x64
+          --self-contained true -p:PublishSingleFile=false -p:PublishTrimmed=false
+          -o publish
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlowType-win-x64
+          path: publish/

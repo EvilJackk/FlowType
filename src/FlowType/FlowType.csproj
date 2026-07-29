@@ -1,0 +1,61 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RootNamespace>FlowType</RootNamespace>
+    <AssemblyName>FlowType</AssemblyName>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationIcon>Resources\flowtype.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+  </PropertyGroup>
+
+  <!-- Version + publisher metadata. Unsigned binaries with blank metadata are
+       a classic heuristic trigger for AV engines; complete, honest identity
+       information is the first step to being trusted. -->
+  <PropertyGroup>
+    <Version>1.2.0</Version>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
+    <FileVersion>1.2.0.0</FileVersion>
+    <InformationalVersion>1.2.0</InformationalVersion>
+    <Product>FlowType</Product>
+    <AssemblyTitle>FlowType — local voice typing</AssemblyTitle>
+    <Description>Offline AI voice dictation for Windows. Speech is transcribed locally with OpenAI Whisper (whisper.cpp); no audio or text leaves the device.</Description>
+    <Company>Evil Jackk</Company>
+    <Authors>Evil Jackk</Authors>
+    <Copyright>Copyright © 2026 Evil Jackk. MIT licensed.</Copyright>
+    <NeutralLanguage>en-US</NeutralLanguage>
+  </PropertyGroup>
+
+  <!-- Publish defaults chosen for antivirus friendliness:
+       compression and trimming rewrite/pack the payload at build time, which
+       is exactly the shape packers use and a common false-positive trigger.
+       Leaving both off keeps every assembly intact and inspectable. -->
+  <PropertyGroup>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <PublishSingleFile>false</PublishSingleFile>
+    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <PublishReadyToRun>false</PublishReadyToRun>
+    <DebugType>embedded</DebugType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="NAudio" Version="2.2.1" />
+    <PackageReference Include="Whisper.net" Version="1.8.1" />
+    <PackageReference Include="Whisper.net.Runtime" Version="1.8.1" />
+    <PackageReference Include="Whisper.net.Runtime.Vulkan" Version="1.8.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Resources\Fonts\*.otf" />
+    <Resource Include="Resources\logo.png" />
+    <Content Include="Resources\flowtype.ico" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+</Project>
