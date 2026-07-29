@@ -56,7 +56,7 @@ public partial class MainWindow : Window
             : $"{version.Major}.{version.Minor}.{version.Build}";
         AboutText.Text = $"FlowType {versionText} — local AI voice typing for Windows. " +
             "Everything runs on this PC; audio never leaves it.";
-        CreditText.Text = "Created by Evil Jackk";
+        CreditText.Text = "Created by EvilJackk";
 
         LoadSettingsControls();
         RefreshModels();

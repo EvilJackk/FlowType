@@ -25,9 +25,9 @@
     <Product>FlowType</Product>
     <AssemblyTitle>FlowType — local voice typing</AssemblyTitle>
     <Description>Offline AI voice dictation for Windows. Speech is transcribed locally with OpenAI Whisper (whisper.cpp); no audio or text leaves the device.</Description>
-    <Company>Evil Jackk</Company>
-    <Authors>Evil Jackk</Authors>
-    <Copyright>Copyright © 2026 Evil Jackk. MIT licensed.</Copyright>
+    <Company>EvilJackk</Company>
+    <Authors>EvilJackk</Authors>
+    <Copyright>Copyright © 2026 EvilJackk. MIT licensed.</Copyright>
     <NeutralLanguage>en-US</NeutralLanguage>
   </PropertyGroup>
 

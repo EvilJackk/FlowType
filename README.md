@@ -9,7 +9,7 @@
 [![.NET](https://img.shields.io/badge/.NET-8.0-512BD4)](https://dotnet.microsoft.com/)
 [![Offline](https://img.shields.io/badge/100%25-Offline-success)](SECURITY.md)
 
-*Created by Evil Jackk*
+*Created by EvilJackk*
 
 </div>
 
@@ -137,12 +137,7 @@ build/publish.ps1      # release packaging (+ optional code signing)
 
 ## Credits
 
-Created by **Evil Jackk**.
-
-Built on [whisper.cpp](https://github.com/ggerganov/whisper.cpp) and
-[Whisper.net](https://github.com/sandrohanea/whisper.net) (OpenAI Whisper),
-[NAudio](https://github.com/naudio/NAudio), and the Satoshi & Clash Display
-typefaces from [Fontshare](https://www.fontshare.com).
+Created by **EvilJackk**.
 
 MIT licensed — see [LICENSE](LICENSE). Inspired by
 [Wispr Flow](https://wisprflow.ai); independent and unaffiliated.
