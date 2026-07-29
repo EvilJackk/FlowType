@@ -60,3 +60,7 @@ non-obvious constraint over a comment on the obvious line.
 Keep them focused, describe what you verified (ideally the `--selftest`
 output), and mention any Windows version or keyboard hardware specifics if the
 change touches input.
+
+## Releasing
+
+Packaging and signing steps live in [build/RELEASING.md](build/RELEASING.md).

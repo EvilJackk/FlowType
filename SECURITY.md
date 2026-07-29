@@ -38,34 +38,31 @@ the ones it can:
 - **Narrow behavior.** No persistence beyond an optional Run-key entry you
   control in Settings, no process injection, no network beyond model downloads.
 
-### The one thing that actually removes the warnings
+### Why Windows still shows a warning
 
-**Authenticode code signing.** An OV certificate (~$200–400/yr from Sectigo,
-DigiCert, SSL.com) builds publisher reputation over time; an **EV certificate**
-gets SmartScreen trust essentially immediately. Once you have one:
+Releases are not yet Authenticode code-signed, so SmartScreen displays an
+"unknown publisher" prompt the first time you run FlowType. Code signing is the
+only thing that removes that prompt; until then, the full source, the build
+script, and this document are the transparency offered in its place. You can
+also build your own copy from source in one command and skip the download
+entirely.
 
-```powershell
-pwsh build\publish.ps1 -Sign -Thumbprint <your-cert-thumbprint>
-```
+What FlowType will never do to look more trustworthy: obfuscation, entropy
+padding, or anything else designed to slip past scanners. Those are what actual
+malware does, and they make the situation worse rather than better.
 
-Self-signed certificates do **not** help — Windows doesn't trust them, and they
-can look worse than no signature at all.
+### If a scanner flags it
 
-### If a scanner flags it anyway
-
-Submit it as a false positive; vendors turn these around quickly and it fixes
-it for everyone:
+Reporting it as a false positive helps everyone — vendors usually turn these
+around quickly:
 
 - Microsoft Defender — <https://www.microsoft.com/en-us/wdsi/filesubmission>
 - Malwarebytes — <https://www.malwarebytes.com/support> (False Positive form)
-- VirusTotal — note that a handful of red flags among 70+ engines is normal for
-  unsigned indie software; look at *which* engines and whether the label is a
-  generic heuristic like `Trojan.Generic` / `ML.Attribute.HighConfidence`.
 
-Please don't ask for detection *evasion* techniques (obfuscation, entropy
-padding, anti-analysis). They don't make software safer, they're what actual
-malware does, and they make reputation problems worse. Signing and transparency
-are the real fix.
+On VirusTotal, a handful of hits among 70+ engines is normal for unsigned indie
+software. It's worth checking *which* engines flagged it and whether the label
+is a generic heuristic such as `Trojan.Generic` or
+`ML.Attribute.HighConfidence` rather than a specific, named threat.
 
 ## Reporting a vulnerability
 

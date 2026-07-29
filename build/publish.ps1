@@ -16,8 +16,8 @@
 
 .PARAMETER Sign
     Also Authenticode-sign the binaries. Requires a code-signing certificate in
-    the current user's store; pass its thumbprint via -Thumbprint. Signing is
-    what actually earns SmartScreen/AV trust — see SECURITY.md.
+    the current user's store; pass its thumbprint via -Thumbprint.
+    See build\RELEASING.md.
 
 .EXAMPLE
     pwsh build\publish.ps1

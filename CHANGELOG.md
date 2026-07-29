@@ -4,6 +4,16 @@ All notable changes to FlowType. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/).
 
+## [1.2.0] — 2026-07-28
+
+First public release.
+
+### Changed
+- Simplified the About panel in Settings.
+- Documentation: split third-party attributions into
+  [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md), added contributor and
+  release guides.
+
 ## [1.1.1] — 2026-07-28
 
 ### Fixed
@@ -12,8 +22,6 @@ All notable changes to FlowType. Format loosely follows
   menu never received focus, so clicking elsewhere couldn't dismiss it. The bar
   now activates for exactly as long as the menu is open and hands focus back to
   your previous window on close.
-- Removed a stale executable left in the pre-`RuntimeIdentifier` output path
-  that could be launched by mistake.
 
 ### Added
 - Tray menu restyled to match the app: dark palette, rounded hover, Windows 11
