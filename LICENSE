@@ -19,16 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-Third-party components:
-
-- Whisper.net (MIT) — https://github.com/sandrohanea/whisper.net
-- whisper.cpp (MIT) — https://github.com/ggerganov/whisper.cpp
-- NAudio (MIT) — https://github.com/naudio/NAudio
-- OpenAI Whisper models (MIT) — https://github.com/openai/whisper
-- Satoshi & Clash Display fonts (Fontshare Free License) — https://www.fontshare.com
-
-FlowType is inspired by Wispr Flow but is an independent, unaffiliated
-open-source project.

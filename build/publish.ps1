@@ -52,7 +52,7 @@ New-Item -ItemType Directory -Force $distRoot | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "dotnet publish failed ($LASTEXITCODE)" }
 
 # Ship the docs users actually need next to the executable.
-foreach ($doc in @('README.md', 'LICENSE', 'SECURITY.md')) {
+foreach ($doc in @('README.md', 'LICENSE', 'SECURITY.md', 'THIRD-PARTY-NOTICES.md')) {
     $path = Join-Path $repoRoot $doc
     if (Test-Path $path) { Copy-Item $path $outDir }
 }

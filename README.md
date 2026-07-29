@@ -139,5 +139,6 @@ build/publish.ps1      # release packaging (+ optional code signing)
 
 Created by **EvilJackk**.
 
-MIT licensed — see [LICENSE](LICENSE). Inspired by
+MIT licensed — see [LICENSE](LICENSE) and
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). Inspired by
 [Wispr Flow](https://wisprflow.ai); independent and unaffiliated.
