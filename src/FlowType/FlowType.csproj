@@ -12,6 +12,20 @@
     <ApplicationIcon>Resources\flowtype.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
+
+    <!-- Rewrite build-machine source paths to a neutral prefix. Debug symbols
+         (embedded in the assembly for release builds) otherwise record the
+         full path of every source file, which then appears in stack traces and
+         ships to users — leaking the builder's username and folder layout.
+         Line numbers still work; only the machine-specific prefix is gone. -->
+    <PathMap>$(MSBuildThisFileDirectory)=/src/FlowType/</PathMap>
+
+    <!-- Release builds are the ones users receive, so normalise source roots
+         there too. Without this the SDK's SourceLink support embeds a map from
+         the build machine's absolute path to the GitHub raw URL, putting the
+         builder's username and folder names inside the shipped assembly.
+         Debug builds keep real paths so local debugging still steps through. -->
+    <DeterministicSourcePaths Condition="'$(Configuration)' == 'Release'">true</DeterministicSourcePaths>
   </PropertyGroup>
 
   <!-- Version + publisher metadata. Unsigned binaries with blank metadata are
