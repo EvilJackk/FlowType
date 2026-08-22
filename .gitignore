@@ -13,3 +13,6 @@ publish/
 # OS
 Thumbs.db
 desktop.ini
+
+# Local working notes - never published
+HANDOFF.md
