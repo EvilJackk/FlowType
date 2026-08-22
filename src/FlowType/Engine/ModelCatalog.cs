@@ -47,15 +47,27 @@ public static class ModelCatalog
             "Near-flagship accuracy in a compact file. Shines with GPU.",
             "574 MB", 500_000_000, 6, EnglishOnly: false),
         new WhisperModel("large-v3-turbo", "Turbo · Full",
-            "Best accuracy. Wants a GPU (or patience).",
+            "Hears unclear speech far better than Small, and still fast. The pick for any real GPU.",
             "1.6 GB", 1_400_000_000, 8, EnglishOnly: false),
+        new WhisperModel("large-v3-q5_0", "Large · Maximum",
+            "The flagship. Best on mumbled speech in our tests (about a third of Turbo's errors) at roughly twice the wait. Wants a strong GPU.",
+            "1.1 GB", 950_000_000, 8, EnglishOnly: false),
     };
 
     public static WhisperModel? ById(string id) => All.FirstOrDefault(m => m.Id == id);
 
-    /// <summary>Best starting point for this machine (RAM-based; user can switch anytime).</summary>
+    /// <summary>
+    /// Best starting point for this machine; the user can switch anytime.
+    /// A discrete GPU runs Turbo faster than a CPU runs Small, and Turbo is
+    /// a different league on quiet or mumbled speech — so GPU machines are
+    /// steered there. CPU-only machines stay on the RAM-based pick.
+    /// </summary>
     public static WhisperModel Recommended()
     {
+        if (SettingsStore.Instance.Settings.UseGpu && GpuInfo.HasDiscreteGpu)
+        {
+            return ById("large-v3-turbo")!;
+        }
         var ramGB = (int)(GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (1024L * 1024 * 1024));
         return ramGB >= 8 ? ById("small.en")! : ById("base.en")!;
     }

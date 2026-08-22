@@ -25,7 +25,14 @@ public partial class FlowBarWindow : Window
 {
     private const int LiveBarCount = 16;
     private const int IdleBarCount = 5;
-    private const double LiveBarMin = 3, LiveBarMax = 26;
+    private const double LiveBarMin = 2, LiveBarMax = 16;
+
+    // Pill geometry per state. Kept deliberately low (≤ 28 px) so the bar
+    // never covers the message box at the bottom of chat apps.
+    private const double IdleWidth = 72, IdleHeight = 22;
+    private const double RecordingWidth = 232, RecordingHeight = 28;
+    private const double ProcessingWidth = 150, ProcessingHeight = 26;
+    private const double MessageHeight = 26, MaxMessageWidth = 440;
 
     private readonly Rectangle[] _liveBars = new Rectangle[LiveBarCount];
     private readonly double[] _levels = new double[LiveBarCount];
@@ -50,16 +57,16 @@ public partial class FlowBarWindow : Window
     {
         InitializeComponent();
 
-        var liveBrush = new SolidColorBrush(Color.FromRgb(0xEC, 0xE8, 0xF6));
+        var liveBrush = new SolidColorBrush(Color.FromRgb(0xF4, 0xF4, 0xF4));
         for (var i = 0; i < LiveBarCount; i++)
         {
             var bar = new Rectangle
             {
-                Width = 3,
+                Width = 2.5,
                 Height = LiveBarMin,
-                RadiusX = 1.5,
-                RadiusY = 1.5,
-                Margin = new Thickness(1.6, 0, 1.6, 0),
+                RadiusX = 1.25,
+                RadiusY = 1.25,
+                Margin = new Thickness(1.4, 0, 1.4, 0),
                 VerticalAlignment = VerticalAlignment.Center,
                 Fill = liveBrush,
             };
@@ -67,20 +74,20 @@ public partial class FlowBarWindow : Window
             BarsPanel.Children.Add(bar);
         }
 
-        var idleBrush = new SolidColorBrush(Color.FromRgb(0x7C, 0x6C, 0xFF));
-        var idleHeights = new[] { 6.0, 11.0, 15.0, 11.0, 6.0 };
+        var idleBrush = new SolidColorBrush(Color.FromRgb(0xFF, 0xFF, 0xFF));
+        var idleHeights = new[] { 4.0, 7.0, 10.0, 7.0, 4.0 };
         for (var i = 0; i < IdleBarCount; i++)
         {
             IdlePanel.Children.Add(new Rectangle
             {
-                Width = 3,
+                Width = 2.5,
                 Height = idleHeights[i],
-                RadiusX = 1.5,
-                RadiusY = 1.5,
-                Margin = new Thickness(2, 0, 2, 0),
+                RadiusX = 1.25,
+                RadiusY = 1.25,
+                Margin = new Thickness(1.8, 0, 1.8, 0),
                 VerticalAlignment = VerticalAlignment.Center,
                 Fill = idleBrush,
-                Opacity = 0.85,
+                Opacity = 0.8,
             });
         }
 
@@ -125,14 +132,14 @@ public partial class FlowBarWindow : Window
                 TimeText.Text = "0:00";
                 RecordingPanel.Visibility = Visibility.Visible;
                 _animTimer.Start();
-                MorphBar(300, 46);
+                MorphBar(RecordingWidth, RecordingHeight);
                 ShowBar();
                 break;
 
             case SessionState.Processing:
                 _animTimer.Stop();
                 ProcessingPanel.Visibility = Visibility.Visible;
-                MorphBar(190, 40);
+                MorphBar(ProcessingWidth, ProcessingHeight);
                 ShowBar();
                 break;
 
@@ -141,7 +148,7 @@ public partial class FlowBarWindow : Window
                 MessageText.Text = detail;
                 MessageText.Foreground = (Brush)FindResource("DangerBrush");
                 MessageText.Visibility = Visibility.Visible;
-                MorphBar(Math.Min(460, 80 + detail.Length * 6.4), 40);
+                MorphBar(Math.Min(MaxMessageWidth, 60 + detail.Length * 6.2), MessageHeight);
                 ShowBar();
                 break;
 
@@ -152,7 +159,7 @@ public partial class FlowBarWindow : Window
                     && SettingsStore.Instance.Settings.BarPosition != "hidden")
                 {
                     IdlePanel.Visibility = Visibility.Visible;
-                    MorphBar(96, 32);
+                    MorphBar(IdleWidth, IdleHeight);
                     ShowBar();
                 }
                 else
@@ -176,7 +183,7 @@ public partial class FlowBarWindow : Window
             ? (Brush)FindResource("DangerBrush")
             : (Brush)FindResource("TextBrush");
         MessageText.Visibility = Visibility.Visible;
-        MorphBar(Math.Min(460, 60 + message.Length * 6.8), 36);
+        MorphBar(Math.Min(MaxMessageWidth, 44 + message.Length * 6.4), MessageHeight);
         ShowBar();
 
         _flashTimer.Stop();
@@ -337,6 +344,56 @@ public partial class FlowBarWindow : Window
     {
         var hotkey = HotkeyDefs.CurrentDisplay(SettingsStore.Instance.Settings);
         Bar.ToolTip = $"Hold {hotkey} to talk • tap it for hands-free • Esc cancels • click to toggle";
+    }
+
+    // ----- Snapshot (hidden diagnostic) -----
+
+    /// <summary>Render each bar state to PNG over a neutral backdrop.</summary>
+    internal void SnapshotStates(string dir)
+    {
+        var root = (FrameworkElement)Content;
+        var backdrop = new SolidColorBrush(Color.FromRgb(0x2B, 0x2B, 0x2B));
+
+        void Shoot(string name, double width, double height)
+        {
+            // Animations would otherwise hold the old size for 180 ms.
+            Bar.BeginAnimation(WidthProperty, null);
+            Bar.BeginAnimation(HeightProperty, null);
+            Bar.Width = width;
+            Bar.Height = height;
+            UpdateLayout();
+            Snapshot.Save(root, System.IO.Path.Combine(dir, $"bar-{name}.png"), backdrop);
+        }
+
+        _flashActive = false;
+        ApplyState(SessionState.Idle, "");
+        Shoot("idle", IdleWidth, IdleHeight);
+
+        ApplyState(SessionState.Recording, "");
+        _animTimer.Stop();
+        var demo = new[] { 0.2, 0.5, 0.9, 0.6, 0.3, 0.7, 1.0, 0.5, 0.25, 0.6, 0.8, 0.4, 0.2, 0.5, 0.3, 0.15 };
+        for (var i = 0; i < LiveBarCount; i++)
+        {
+            _liveBars[i].Height = LiveBarMin + demo[i] * (LiveBarMax - LiveBarMin);
+        }
+        TimeText.Text = "0:07";
+        Shoot("recording", RecordingWidth, RecordingHeight);
+
+        ApplyState(SessionState.Processing, "");
+        Shoot("processing", ProcessingWidth, ProcessingHeight);
+
+        const string flash = "✓ 42 words";
+        ShowFlash(flash, false);
+        _flashTimer.Stop();
+        Shoot("flash", Math.Min(MaxMessageWidth, 44 + flash.Length * 6.4), MessageHeight);
+
+        _flashActive = false;
+        const string error = "Microphone unavailable: no input device";
+        ApplyState(SessionState.Error, error);
+        Shoot("error", Math.Min(MaxMessageWidth, 60 + error.Length * 6.2), MessageHeight);
+
+        _flashActive = false;
+        ApplyState(SessionState.Idle, "");
     }
 
     // ----- Window plumbing -----

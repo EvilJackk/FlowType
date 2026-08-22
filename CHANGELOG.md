@@ -4,6 +4,45 @@ All notable changes to FlowType. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/).
 
+## [1.3.0] — 2026-08-22
+
+### Changed — recognition
+- **Beam-search decoding** (5 hypotheses, temperature fallback ladder) replaces
+  greedy decoding. Settings → AI model → *Accurate decoding*, on by default.
+- **Audio conditioning** before the model: 80 Hz high-pass, gain lift for
+  quiet takes (capped at +24 dB), lead-in/tail padding. Sub-second utterances
+  were silently dropped before (whisper.cpp refuses anything under 1 s); they
+  are now padded and transcribed. Near-silent takes are rejected instead of
+  being hallucinated into "Thank you."
+- **Capture tail**: the mic stays open 280 ms after the hotkey is released, so
+  a word released on its last syllable is no longer clipped.
+- **Hallucination guard**: on audio it cannot make out, Whisper sometimes
+  echoes its own prompt ("The following is American English, and the
+  following is…") or loops a phrase. Both are now detected and dropped before
+  anything is typed; genuine speech is untouched (covered by selftest vectors).
+- **Warm-up after model load**: a short embedded clip runs through the model
+  as soon as it loads, so the first real dictation no longer pays the 1–2 s
+  GPU kernel/buffer setup.
+- Dictionary rewrite targets (e.g. "Arma Reforger") now also bias recognition,
+  not only vocabulary-only entries.
+- **Model catalog**: *Turbo · Full* is now recommended automatically on
+  machines with a dedicated GPU; *Large · Maximum* (large-v3, 1.1 GB) added.
+- Flash attention enabled on the GPU path; whisper thread count follows
+  physical cores on the CPU path (was capped at 4).
+- Whisper.net 1.8.1 → 1.9.1 (newer whisper.cpp / ggml Vulkan kernels).
+- New hidden diagnostic: `FlowType.exe --bench <folder>` measures word error
+  rate and latency per model and decoding mode; `--selftest` now reports
+  which GPU whisper picked and checks the audio conditioner.
+
+### Changed — look
+- **Monochrome theme** everywhere: near-black surfaces, white accent, greys —
+  the purple is gone from the windows, flow bar, tray menu, chips, and the
+  app icon. Check boxes, radio buttons, combo boxes, progress bars and scroll
+  bars are now styled to match instead of using the stock Windows look.
+- **Slimmer flow bar**: roughly 40 % shorter in every state (≤ 28 px), narrower,
+  and moved down to 4 px above the taskbar so it stops covering message boxes
+  at the bottom of chat apps.
+
 ## [1.2.0] — 2026-07-28
 
 First public release.

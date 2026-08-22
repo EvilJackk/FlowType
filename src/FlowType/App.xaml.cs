@@ -49,6 +49,21 @@ public partial class App : Application
             return;
         }
 
+        var benchIndex = Array.IndexOf(e.Args, "--bench");
+        if (benchIndex >= 0)
+        {
+            RunBench(e.Args.ElementAtOrDefault(benchIndex + 1) ?? "");
+            return;
+        }
+
+        var snapshotIndex = Array.IndexOf(e.Args, "--snapshot");
+        if (snapshotIndex >= 0)
+        {
+            RunSnapshot(e.Args.ElementAtOrDefault(snapshotIndex + 1)
+                ?? Path.Combine(AppPaths.DataDir, "snapshot"));
+            return;
+        }
+
         _instanceMutex = new Mutex(initiallyOwned: true, "FlowType_SingleInstance", out var isFirst);
         if (!isFirst)
         {
@@ -91,11 +106,33 @@ public partial class App : Application
         {
             ShowMain(settings: true);
         }
+        else if (e.Args.Contains("--open"))
+        {
+            // Handy for shortcuts: launch straight into the main window.
+            ShowMain(settings: e.Args.Contains("--settings"));
+        }
     }
 
     // ----- Tray -----
 
     private void SetupTray()
+    {
+        var menu = BuildTrayMenu();
+
+        var iconPath = Path.Combine(AppContext.BaseDirectory, "Resources", "flowtype.ico");
+        _tray = new WinForms.NotifyIcon
+        {
+            Icon = new System.Drawing.Icon(iconPath),
+            Text = "FlowType — local voice typing",
+            Visible = true,
+            ContextMenuStrip = menu,
+        };
+        _tray.DoubleClick += (_, _) => Dispatcher.BeginInvoke(() => ShowMain());
+
+        UpdateTrayMenu();
+    }
+
+    private WinForms.ContextMenuStrip BuildTrayMenu()
     {
         var menu = new WinForms.ContextMenuStrip
         {
@@ -162,17 +199,7 @@ public partial class App : Application
             item.Padding = new WinForms.Padding(6, 3, 6, 3);
         }
 
-        var iconPath = Path.Combine(AppContext.BaseDirectory, "Resources", "flowtype.ico");
-        _tray = new WinForms.NotifyIcon
-        {
-            Icon = new System.Drawing.Icon(iconPath),
-            Text = "FlowType — local voice typing",
-            Visible = true,
-            ContextMenuStrip = menu,
-        };
-        _tray.DoubleClick += (_, _) => Dispatcher.BeginInvoke(() => ShowMain());
-
-        UpdateTrayMenu();
+        return menu;
     }
 
     private void UpdateTrayMenu()
@@ -292,6 +319,188 @@ public partial class App : Application
         }
     }
 
+    // ----- Snapshot (hidden diagnostic: FlowType.exe --snapshot <folder>) -----
+
+    /// <summary>
+    /// Renders every window and page to PNG without using the screen: the
+    /// windows are laid out far off-screen, never activated, and rasterised
+    /// with RenderTargetBitmap. Lets the look be verified on a machine where
+    /// a game or remote session owns the display.
+    /// </summary>
+    private async void RunSnapshot(string dir)
+    {
+        try
+        {
+            Directory.CreateDirectory(dir);
+
+            var main = new MainWindow
+            {
+                WindowStartupLocation = WindowStartupLocation.Manual,
+                Left = -20000, Top = -20000,
+                ShowActivated = false, ShowInTaskbar = false,
+            };
+            main.Show();
+            await Task.Delay(400);
+            main.SnapshotPages(dir);
+            main.Close();
+
+            var onboarding = new OnboardingWindow
+            {
+                WindowStartupLocation = WindowStartupLocation.Manual,
+                Left = -20000, Top = -20000,
+                ShowActivated = false, ShowInTaskbar = false,
+            };
+            onboarding.Show();
+            await Task.Delay(200);
+            onboarding.SnapshotSteps(dir);
+            onboarding.Close();
+
+            var bar = new FlowBarWindow();
+            await Task.Delay(200);
+            bar.SnapshotStates(dir);
+            bar.AllowClose();
+
+            try
+            {
+                var menu = BuildTrayMenu();
+                UpdateTrayMenuOf(menu);
+                menu.PerformLayout();
+                var size = menu.GetPreferredSize(System.Drawing.Size.Empty);
+                menu.Size = size;
+                using var bmp = new System.Drawing.Bitmap(size.Width, size.Height);
+                menu.DrawToBitmap(bmp, new System.Drawing.Rectangle(System.Drawing.Point.Empty, size));
+                bmp.Save(Path.Combine(dir, "tray-menu.png"), System.Drawing.Imaging.ImageFormat.Png);
+            }
+            catch (Exception ex)
+            {
+                File.WriteAllText(Path.Combine(dir, "tray-menu-error.txt"), ex.ToString());
+            }
+        }
+        catch (Exception ex)
+        {
+            File.WriteAllText(Path.Combine(dir, "snapshot-error.txt"), ex.ToString());
+        }
+        finally
+        {
+            Shutdown();
+        }
+    }
+
+    /// <summary>The tray menu's status caption for a menu that isn't the live one.</summary>
+    private static void UpdateTrayMenuOf(WinForms.ContextMenuStrip menu)
+    {
+        if (menu.Items.Count > 0 && menu.Items[0] is WinForms.ToolStripMenuItem status)
+        {
+            status.Text = $"Ready · hold {HotkeyDefs.CurrentDisplay(SettingsStore.Instance.Settings)}";
+        }
+    }
+
+    // ----- Benchmark (hidden diagnostic: FlowType.exe --bench <folder>) -----
+
+    /// <summary>
+    /// Accuracy and speed harness. Every 16 kHz mono WAV in the folder with a
+    /// sibling .txt reference is transcribed by each downloaded model in both
+    /// decoding modes; word error rate and wall time go to
+    /// %APPDATA%\FlowType\bench.txt. Clip names ending in "_condition" are
+    /// additionally broken down per condition (the synthetic set built for
+    /// 1.3.0 uses clean / muffled / noisy / rushed). The pipeline under test
+    /// is exactly the production one: conditioning, prompt, decoding params.
+    /// </summary>
+    private async void RunBench(string dir)
+    {
+        var log = new StringBuilder();
+        try
+        {
+            if (!Directory.Exists(dir)) throw new DirectoryNotFoundException(dir);
+            var clips = Directory.GetFiles(dir, "*.wav")
+                .Where(w => File.Exists(Path.ChangeExtension(w, ".txt")))
+                .OrderBy(w => w, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (clips.Length == 0) throw new FileNotFoundException("No .wav + .txt pairs in " + dir);
+
+            var s = SettingsStore.Instance.Settings;
+            log.AppendLine($"FlowType bench {DateTime.Now:yyyy-MM-dd HH:mm} — {clips.Length} clips in {dir}");
+            log.AppendLine($"gpu={s.UseGpu} variant={s.EnglishVariant} language={s.Language} " +
+                $"adapters={string.Join(" | ", GpuInfo.AdapterNames)}");
+            log.AppendLine();
+            log.AppendLine($"{"model",-22} {"mode",-9} {"WER",7} {"avg ms",8} {"max ms",8}  per-condition WER");
+
+            var models = ModelCatalog.All.Where(m => m.IsDownloaded).OrderBy(m => m.MinBytes).ToList();
+            var worst = new StringBuilder();
+            var coldStarts = new StringBuilder();
+            foreach (var model in models)
+            {
+                var loadSw = System.Diagnostics.Stopwatch.StartNew();
+                await Transcriber.Instance.LoadModelAsync(model.Id);
+                var loadMs = loadSw.ElapsedMilliseconds;
+                // First call on a model compiles GPU kernels; timed separately
+                // as the "cold start" the user pays once per session.
+                var coldSw = System.Diagnostics.Stopwatch.StartNew();
+                await Transcriber.Instance.TranscribeAsync(clips[0], "en", Array.Empty<string>(), default, true);
+                coldStarts.AppendLine($"   {model.Id,-22} load {loadMs,6} ms   first transcription {coldSw.ElapsedMilliseconds,6} ms");
+
+                foreach (var accurate in new[] { false, true })
+                {
+                    int errors = 0, words = 0;
+                    long totalMs = 0, maxMs = 0;
+                    var byCondition = new Dictionary<string, (int Err, int Words)>();
+                    var clipResults = new List<(int Err, string Name, string Hyp)>();
+                    foreach (var clip in clips)
+                    {
+                        var reference = File.ReadAllText(Path.ChangeExtension(clip, ".txt"));
+                        var sw = System.Diagnostics.Stopwatch.StartNew();
+                        var hyp = await Transcriber.Instance.TranscribeAsync(
+                            clip, "en", Array.Empty<string>(), default, accurate);
+                        sw.Stop();
+                        var (err, n) = WordErrorRate.Count(reference, hyp);
+                        errors += err; words += n;
+                        totalMs += sw.ElapsedMilliseconds; maxMs = Math.Max(maxMs, sw.ElapsedMilliseconds);
+
+                        var name = Path.GetFileNameWithoutExtension(clip);
+                        var cond = name.Contains('_') ? name[(name.LastIndexOf('_') + 1)..] : "all";
+                        byCondition.TryGetValue(cond, out var c);
+                        byCondition[cond] = (c.Err + err, c.Words + n);
+                        clipResults.Add((err, name, hyp));
+                    }
+                    var mode = accurate ? "accurate" : "fast";
+                    var perCond = string.Join("  ", byCondition.OrderBy(k => k.Key)
+                        .Select(k => $"{k.Key}={100.0 * k.Value.Err / Math.Max(1, k.Value.Words):0.0}%"));
+                    log.AppendLine($"{model.Id,-22} {mode,-9} {100.0 * errors / Math.Max(1, words),6:0.0}% " +
+                        $"{totalMs / clips.Length,8} {maxMs,8}  {perCond}");
+
+                    worst.AppendLine($"-- {model.Id} / {mode}: worst clips");
+                    foreach (var (err, name, hyp) in clipResults.OrderByDescending(c => c.Err).Take(3))
+                    {
+                        worst.AppendLine($"   {name} ({err} err): {hyp}");
+                    }
+                }
+            }
+            log.AppendLine();
+            log.AppendLine("cold start per model (model load, then first transcription incl. GPU kernel compile):");
+            log.Append(coldStarts);
+            log.AppendLine();
+            log.AppendLine($"runtime: {Transcriber.Instance.RuntimeLabel}");
+            foreach (var line in Transcriber.Instance.NativeLog.Where(l =>
+                l.Contains("vulkan", StringComparison.OrdinalIgnoreCase)).Take(8))
+            {
+                log.AppendLine($"  native: {line}");
+            }
+            log.AppendLine();
+            log.Append(worst);
+            log.AppendLine("BENCH OK");
+        }
+        catch (Exception ex)
+        {
+            log.AppendLine($"BENCH FAILED: {ex}");
+        }
+        finally
+        {
+            AppPaths.EnsureCreated();
+            File.WriteAllText(Path.Combine(AppPaths.DataDir, "bench.txt"), log.ToString());
+            Shutdown();
+        }
+    }
+
     // ----- Self-test (hidden diagnostic: FlowType.exe --selftest) -----
 
     /// <summary>
@@ -304,10 +513,20 @@ public partial class App : Application
         try
         {
             var s = SettingsStore.Instance.Settings;
-            log.AppendLine($"settings: model={s.SelectedModel} gpu={s.UseGpu} mic='{s.MicDeviceName}' hotkey={s.Hotkey} mode={s.ActivationMode}");
+            log.AppendLine($"settings: model={s.SelectedModel} gpu={s.UseGpu} accurate={s.AccurateDecoding} mic='{s.MicDeviceName}' hotkey={s.Hotkey} mode={s.ActivationMode}");
+            log.AppendLine($"adapters: {string.Join(" | ", GpuInfo.AdapterNames)} (discrete={GpuInfo.HasDiscreteGpu}, recommended={ModelCatalog.Recommended().Id})");
 
             await Transcriber.Instance.InitializeAsync();
             log.AppendLine($"model: loaded={Transcriber.Instance.IsReady} id={Transcriber.Instance.CurrentModelId} runtime={Transcriber.Instance.RuntimeLabel}");
+            // Which device whisper.cpp actually picked lives only in its own log.
+            foreach (var line in Transcriber.Instance.NativeLog.Where(l =>
+                l.Contains("vulkan", StringComparison.OrdinalIgnoreCase)
+                || l.Contains("device", StringComparison.OrdinalIgnoreCase)
+                || l.Contains("backend", StringComparison.OrdinalIgnoreCase)
+                || l.Contains("flash", StringComparison.OrdinalIgnoreCase)).Take(20))
+            {
+                log.AppendLine($"  native: {line}");
+            }
 
             if (Transcriber.Instance.IsReady)
             {
@@ -325,6 +544,18 @@ public partial class App : Application
                     AudioRecorder.TryDelete(take.Value.Path);
                 }
             }
+
+            // Audio conditioning: silence is rejected, short takes are padded
+            // past whisper.cpp's 1 s floor, quiet takes are lifted.
+            var silent = AudioConditioner.Prepare(new float[8000]);
+            var quiet = new float[4000];
+            for (var i = 0; i < quiet.Length; i++) quiet[i] = 0.05f * (float)Math.Sin(i * 0.3);
+            var lifted = AudioConditioner.Prepare(quiet);
+            var conditionOk = silent.Length == 0
+                && lifted.Length >= AudioConditioner.SampleRate * 1.2
+                && AudioConditioner.Peak(lifted) > 0.8f;
+            log.AppendLine($"conditioning {(conditionOk ? "PASS" : "FAIL")}: silent->{silent.Length} samples, " +
+                $"quiet 0.25s->{lifted.Length} samples peak {AudioConditioner.Peak(lifted):0.00}");
 
             // Formatter vectors — every Wispr-style transform in one pass.
             var opts = new FormatterOptions(
@@ -379,8 +610,40 @@ public partial class App : Application
             }
             log.AppendLine($"english variant: {variantPass}/{variantVectors.Length} passed");
 
+            // Hallucination guard: prompt echo and phrase loops seen on
+            // unintelligible audio in the 1.3.0 bench; real speech untouched.
+            const string prompt = "The following is American English, using American spelling: "
+                + "color, favorite, realize, organized, center, theater.";
+            var vocab = new[] { "John Smith", "Acme Corp", "Arma Reforger", "FigJam" };
+            var guardVectors = new (string Input, string Expected)[]
+            {
+                ("The following is American English, and the following is American English, and the following is American English.", ""),
+                ("color, favorite, realize, organized, center.", ""),
+                ("I'm going to give you a little bit of a lesson. I'm going to give you a little bit of a lesson.",
+                    "I'm going to give you a little bit of a lesson."),
+                ("the quarter of the quarter of the quarter of the quarter, then the numbers.",
+                    "the quarter of the quarter, then the numbers."),
+                ("Send the report to finance. Thanks.", "Send the report to finance. Thanks."),
+                ("Let me know if the following is American English or something else entirely, please.",
+                    "Let me know if the following is American English or something else entirely, please."),
+                ("John Smith Acme Corp", "John Smith Acme Corp"),
+                ("John Smith, Acme Corp, Arma Reforger, FigJam.", ""),
+            };
+            var guardPass = 0;
+            foreach (var (input, expected) in guardVectors)
+            {
+                var actual = HallucinationFilter.Apply(input, prompt, vocab);
+                var ok = actual == expected;
+                if (ok) guardPass++;
+                log.AppendLine($"guard {(ok ? "PASS" : "FAIL")}: '{actual}'" +
+                    (ok ? "" : $" (expected '{expected}')"));
+            }
+            log.AppendLine($"hallucination guard: {guardPass}/{guardVectors.Length} passed");
+
             var allPassed = pass == vectors.Length
                 && variantPass == variantVectors.Length
+                && guardPass == guardVectors.Length
+                && conditionOk
                 && Transcriber.Instance.IsReady;
             log.AppendLine(allPassed ? "SELFTEST OK" : "SELFTEST INCOMPLETE");
         }

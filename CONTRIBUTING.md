@@ -28,10 +28,28 @@ FlowType.exe --selftest
 # 20 seconds of raw keyboard events with virtual-key codes and injected flags.
 # Writes %APPDATA%\FlowType\keylog.txt
 FlowType.exe --keylog
+
+# Accuracy + latency: every .wav (16 kHz mono) with a sibling .txt reference in
+# the folder, through every downloaded model in both decoding modes. Word error
+# rate per model/mode/condition, cold-start and per-clip timings.
+# Writes %APPDATA%\FlowType\bench.txt
+FlowType.exe --bench C:\path\to\clips
+
+# Every window, page and flow-bar state rendered to PNG off-screen — no
+# screenshots, no input, works while a game owns the display.
+FlowType.exe --snapshot C:\path\to\out
 ```
 
 If you touch `TextFormatter` or `EnglishVariant`, add a vector to the arrays in
-`App.RunSelfTest` and make sure the run still reports `SELFTEST OK`.
+`App.RunSelfTest` and make sure the run still reports `SELFTEST OK`. If you
+touch `Transcriber` or `AudioConditioner`, run `--bench` before and after on
+the same clips. The point is the relative change, not the absolute number —
+synthetic clips (Windows TTS, degraded) are easier than real mumbling. For
+reference, the 1.3.0 baseline on an 80-clip heavily degraded TTS set
+(1.1 kHz low-pass "mumble", room reverb, 0 dB noise), RTX 4070 via Vulkan,
+beam search on — word error rate on the "mumble" clips: tiny 57 %, small.en
+9.5 % (16 % greedy), large-v3-turbo 8.7 %, large-v3-q5_0 3.2 %; average
+latency per 4–8 s clip: 0.34 s / 0.50 s / 0.36 s / 0.74 s respectively.
 
 ## Things worth knowing before you change input handling
 

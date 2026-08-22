@@ -185,7 +185,7 @@
 
                             <StackPanel Orientation="Horizontal" Margin="118,12,0,0">
                                 <Ellipse x:Name="HotkeyStateDot" Width="10" Height="10"
-                                         Fill="#3A3648" VerticalAlignment="Center"/>
+                                         Fill="#333333" VerticalAlignment="Center"/>
                                 <TextBlock x:Name="HotkeyStateText" Text="hotkey not pressed"
                                            Style="{StaticResource Hint}" Margin="8,0,0,0"
                                            VerticalAlignment="Center"/>
@@ -262,6 +262,11 @@
                             <CheckBox x:Name="GpuCheck" Margin="0,6,0,0"
                                       Content="Use GPU acceleration (Vulkan) — restart FlowType to apply"
                                       Checked="Setting_Changed" Unchecked="Setting_Changed"/>
+                            <CheckBox x:Name="AccurateCheck" Margin="0,10,0,0"
+                                      Content="Accurate decoding — hears unclear, quiet and mumbled speech better"
+                                      Checked="Setting_Changed" Unchecked="Setting_Changed"/>
+                            <TextBlock Style="{StaticResource Hint}" Margin="26,6,0,0"
+                                       Text="Keeps five candidate readings alive instead of committing to the first guess (beam search). Free on a GPU; roughly 1.5–2× slower on CPU. For the biggest jump on mumbled speech, pair it with Turbo · Full."/>
                         </StackPanel>
                     </Border>
 

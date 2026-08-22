@@ -98,7 +98,7 @@ public partial class OnboardingWindow : Window
         NextButton.Content = _step == 4 ? "Finish" : _step == 1 ? "Get started" : "Next";
 
         var accent = (Brush)FindResource("AccentBrush");
-        var faint = new SolidColorBrush(Color.FromRgb(0x3A, 0x36, 0x48));
+        var faint = new SolidColorBrush(Color.FromRgb(0x33, 0x33, 0x33));
         Step1Dot.Fill = _step >= 1 ? accent : faint;
         Step2Dot.Fill = _step >= 2 ? accent : faint;
         Step3Dot.Fill = _step >= 3 ? accent : faint;
@@ -205,14 +205,14 @@ public partial class OnboardingWindow : Window
                 FontWeight = FontWeights.SemiBold,
                 Foreground = Brushes.White,
             });
-            if (model.Id == recommended.Id) title.Children.Add(MiniChip("Recommended", "#2E7D5B"));
-            if (isActive) title.Children.Add(MiniChip("Active", "#7C6CFF"));
+            if (model.Id == recommended.Id) title.Children.Add(MiniChip("Recommended", filled: false));
+            if (isActive) title.Children.Add(MiniChip("Active", filled: true));
             info.Children.Add(title);
             info.Children.Add(new TextBlock
             {
                 Text = $"{model.Blurb}  ·  {model.SizeLabel}",
                 FontSize = 11.5,
-                Foreground = new SolidColorBrush(Color.FromRgb(0x98, 0x93, 0x9F)),
+                Foreground = (Brush)FindResource("MutedBrush"),
                 Margin = new Thickness(0, 3, 0, 0),
                 TextWrapping = TextWrapping.Wrap,
             });
@@ -462,14 +462,38 @@ public partial class OnboardingWindow : Window
         }
     }
 
-    private static TextBlock MiniChip(string text, string hex) => new()
+    /// <summary>Render each wizard step to PNG (hidden --snapshot diagnostic).</summary>
+    internal void SnapshotSteps(string dir)
     {
-        Text = text,
-        FontSize = 9.5,
-        Foreground = Brushes.White,
-        Padding = new Thickness(6, 1, 6, 2),
+        var root = (FrameworkElement)Content;
+        var bg = (Brush)FindResource("BgBrush");
+        for (var step = 1; step <= 4; step++)
+        {
+            _step = step;
+            UpdateChrome();
+            UpdateLayout();
+            Snapshot.Save(root, System.IO.Path.Combine(dir, $"onboarding-{step}.png"), bg);
+        }
+        AudioRecorder.Instance.StopMonitor();
+    }
+
+    private static Border MiniChip(string text, bool filled) => new()
+    {
+        Child = new TextBlock
+        {
+            Text = text,
+            FontSize = 9.5,
+            FontWeight = FontWeights.Medium,
+            Foreground = filled
+                ? new SolidColorBrush(Color.FromRgb(0x0A, 0x0A, 0x0A))
+                : new SolidColorBrush(Color.FromRgb(0xC8, 0xC8, 0xC8)),
+        },
+        Background = filled ? Brushes.White : Brushes.Transparent,
+        BorderBrush = filled ? Brushes.White : new SolidColorBrush(Color.FromRgb(0x4A, 0x4A, 0x4A)),
+        BorderThickness = new Thickness(1),
+        CornerRadius = new CornerRadius(6),
+        Padding = new Thickness(6, 0, 6, 1),
         Margin = new Thickness(7, 0, 0, 0),
         VerticalAlignment = VerticalAlignment.Center,
-        Background = (Brush)new BrushConverter().ConvertFromString(hex)!,
     };
 }

@@ -4,10 +4,10 @@
 
 **Speak anywhere. Local AI voice typing for Windows.**
 
-[![Download](https://img.shields.io/badge/Download-Windows%20x64-7C6CFF)](../../releases/latest)
-[![License](https://img.shields.io/badge/License-MIT-green)](LICENSE)
-[![.NET](https://img.shields.io/badge/.NET-8.0-512BD4)](https://dotnet.microsoft.com/)
-[![Offline](https://img.shields.io/badge/100%25-Offline-success)](SECURITY.md)
+[![Download](https://img.shields.io/badge/Download-Windows%20x64-111111)](../../releases/latest)
+[![License](https://img.shields.io/badge/License-MIT-555555)](LICENSE)
+[![.NET](https://img.shields.io/badge/.NET-8.0-555555)](https://dotnet.microsoft.com/)
+[![Offline](https://img.shields.io/badge/100%25-Offline-111111)](SECURITY.md)
 
 *Created by EvilJackk*
 
@@ -58,15 +58,22 @@ Say **"scratch that"** to drop everything before it, **"new line"** /
 - **Detect key** — binds to whatever your keyboard *actually* sends, which
   matters if vendor software (Logitech G HUB, Razer Synapse) or a remapper is
   in the path. Mouse side-buttons work too.
-- **The flow bar** — quiet pill when idle, live waveform + timer while
-  listening, "✓ 42 words" when done. Position it bottom, top, or hidden.
+- **The flow bar** — a slim pill hugging the taskbar: quiet when idle, live
+  waveform + timer while listening, "✓ 42 words" when done. Never taller than
+  a line of text, so it stays out of chat boxes. Position it bottom, top, or
+  hidden.
 - **British or American English** — converts spelling both ways (colour/color,
   realise/realize, centre/center, travelled/traveled) *and* biases recognition
   toward that vocabulary. Great for mixed UK/US teams.
 - **Local AI formatting** — filler removal, "scratch that" corrections, line
   commands, optional spoken punctuation, no stray period after emails/URLs.
-- **GPU accelerated** — Vulkan runtime with automatic CPU fallback.
-- **In-app model downloads** — Tiny (75 MB) → Turbo (1.6 GB), from Hugging Face.
+- **Built for unclear speech** — beam-search decoding with temperature
+  fallback, audio conditioning (high-pass, gain lift for quiet takes, padding
+  so sub-second utterances aren't dropped) and a short capture tail after you
+  release the key so the last word is never clipped.
+- **GPU accelerated** — Vulkan runtime with automatic CPU fallback. On a
+  dedicated GPU the full Turbo model runs faster than Small does on a CPU.
+- **In-app model downloads** — Tiny (75 MB) → Large (1.1 GB), from Hugging Face.
 - **Dictionary** — teach names/terms (biases recognition) or create
   rewrites and snippets ("my email" → your address).
 - **Notes & stats** — searchable history with text export, words dictated,
@@ -74,14 +81,26 @@ Say **"scratch that"** to drop everything before it, **"new line"** /
 - **Privacy controls** — turn off transcript saving entirely; pause dictation
   with one checkbox for games or screen shares.
 
-## Strong accents
+## Accuracy: mumbling, accents, quiet rooms
 
-Accent handling is the acoustic model's job, so if a speaker's accent is being
-misheard, **move up a model size** — that helps far more than any setting.
-`Small` handles most regional British, Irish, Scottish, Australian, and Indian
-English well; `Turbo · Quantized` (574 MB) is better still and stays fast on a
-GPU. Add recurring proper nouns to the Dictionary — vocabulary entries are fed
-to the recognizer and noticeably improve names it keeps mangling.
+Two things matter far more than any other setting:
+
+1. **Model size.** `Small` handles clear speech well; `Turbo · Full` (1.6 GB)
+   is in a different league on quiet, rushed or mumbled speech and on strong
+   accents, and on any dedicated GPU it is still faster than Small on a CPU.
+   FlowType recommends it automatically when it sees a discrete GPU.
+   `Large · Maximum` squeezes out a little more on the hardest audio at
+   several times the latency.
+2. **Accurate decoding** (Settings → AI model, on by default) — beam search
+   instead of the first guess. Free on a GPU, ~1.5–2× slower on CPU.
+
+Add recurring proper nouns to the Dictionary — vocabulary entries are fed to
+the recognizer and noticeably improve names it keeps mangling.
+
+To measure instead of guess: `FlowType.exe --bench <folder>` transcribes every
+`.wav` (16 kHz mono) that has a sibling `.txt` reference with each downloaded
+model in both decoding modes and writes word-error rates and timings to
+`%APPDATA%\FlowType\bench.txt`.
 
 ## Build from source
 
@@ -109,7 +128,7 @@ pwsh build/publish.ps1
   administrator; Windows blocks input from non-elevated apps. Run FlowType as
   admin too, or use the flow bar there.
 - **Slow transcription** — Settings → AI model shows `GPU (Vulkan)` or `CPU`.
-  On CPU, prefer Base or Small.
+  On CPU, prefer Base or Small, and try turning off *Accurate decoding*.
 - **Nothing inserted in a specific app** — Settings → Output → *Type it out*.
 - **Verify your install** — `FlowType.exe --selftest` writes a full pipeline
   report to `%APPDATA%\FlowType\selftest.txt`.

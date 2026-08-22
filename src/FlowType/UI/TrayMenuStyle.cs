@@ -45,12 +45,13 @@ internal static class TrayMenuStyle
 /// </summary>
 internal sealed class DarkMenuRenderer : ToolStripProfessionalRenderer
 {
-    public static readonly Color Background = Color.FromArgb(28, 25, 38);
-    public static readonly Color Border = Color.FromArgb(58, 54, 72);
-    public static readonly Color Hover = Color.FromArgb(46, 40, 66);
-    public static readonly Color Text = Color.FromArgb(242, 240, 247);
-    public static readonly Color Muted = Color.FromArgb(152, 147, 159);
-    public static readonly Color Accent = Color.FromArgb(124, 108, 255);
+    // Mirrors Theme.xaml's monochrome palette (MenuBrush, StrokeStrongBrush…).
+    public static readonly Color Background = Color.FromArgb(20, 20, 20);
+    public static readonly Color Border = Color.FromArgb(58, 58, 58);
+    public static readonly Color Hover = Color.FromArgb(38, 38, 38);
+    public static readonly Color Text = Color.FromArgb(244, 244, 244);
+    public static readonly Color Muted = Color.FromArgb(155, 155, 155);
+    public static readonly Color Accent = Color.FromArgb(255, 255, 255);
 
     public DarkMenuRenderer() : base(new DarkColorTable()) { }
 

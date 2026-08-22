@@ -40,6 +40,12 @@ public class AppSettings
     /// <summary>Prefer the Vulkan GPU whisper runtime (falls back to CPU automatically).</summary>
     public bool UseGpu { get; set; } = true;
 
+    /// <summary>
+    /// Beam-search decoding (5 hypotheses) instead of greedy. Markedly better
+    /// on unclear, quiet or rushed speech; costs roughly 1.5–2× decode time.
+    /// </summary>
+    public bool AccurateDecoding { get; set; } = true;
+
     // ----- Audio -----
 
     /// <summary>Capture device by name; empty follows the Windows default.</summary>
@@ -90,5 +96,5 @@ public class AppSettings
     public bool OnboardingComplete { get; set; } = false;
 
     /// <summary>Schema marker so future versions can migrate settings safely.</summary>
-    public int SettingsVersion { get; set; } = 2;
+    public int SettingsVersion { get; set; } = 3;
 }

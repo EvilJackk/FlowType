@@ -210,6 +210,7 @@ public partial class MainWindow : Window
 
         SoundsCheck.IsChecked = s.PlaySounds;
         GpuCheck.IsChecked = s.UseGpu;
+        AccurateCheck.IsChecked = s.AccurateDecoding;
         SaveHistoryCheck.IsChecked = s.SaveHistory;
         PauseCheck.IsChecked = s.DictationPaused;
         AutoInsertCheck.IsChecked = s.AutoInsert;
@@ -344,7 +345,7 @@ public partial class MainWindow : Window
         var paused = SettingsStore.Instance.Settings.DictationPaused;
         HotkeyStateDot.Fill = held
             ? (Brush)FindResource(paused ? "DangerBrush" : "SuccessBrush")
-            : new SolidColorBrush(Color.FromRgb(0x3A, 0x36, 0x48));
+            : new SolidColorBrush(Color.FromRgb(0x33, 0x33, 0x33));
         HotkeyStateText.Text = held
             ? paused ? "hotkey detected — but dictation is paused" : "hotkey HELD — it works!"
             : "hotkey not pressed";
@@ -397,6 +398,7 @@ public partial class MainWindow : Window
             ? mins : 5;
         s.PlaySounds = SoundsCheck.IsChecked == true;
         s.UseGpu = GpuCheck.IsChecked == true;
+        s.AccurateDecoding = AccurateCheck.IsChecked == true;
         s.SaveHistory = SaveHistoryCheck.IsChecked == true;
         s.DictationPaused = PauseCheck.IsChecked == true;
         s.AutoInsert = AutoInsertCheck.IsChecked == true;
@@ -471,10 +473,11 @@ public partial class MainWindow : Window
         _downloadBars.Clear();
 
         var t = Transcriber.Instance;
+        var decoding = SettingsStore.Instance.Settings.AccurateDecoding ? "accurate" : "fast";
         ModelsStatusText.Text = t.IsLoading
             ? "Loading model…"
             : t.IsReady
-                ? $"Active: {ModelCatalog.ById(t.CurrentModelId)?.DisplayName} · running on {t.RuntimeLabel}"
+                ? $"Active: {ModelCatalog.ById(t.CurrentModelId)?.DisplayName} · running on {t.RuntimeLabel} · {decoding} decoding"
                 : "Download a model, then click Use.";
 
         var recommended = ModelCatalog.Recommended();
@@ -502,14 +505,14 @@ public partial class MainWindow : Window
             Foreground = Brushes.White,
             VerticalAlignment = VerticalAlignment.Center,
         });
-        if (isRecommended) titleRow.Children.Add(Chip("Recommended", "#2E7D5B"));
-        if (isActive) titleRow.Children.Add(Chip("Active", "#7C6CFF"));
+        if (isRecommended) titleRow.Children.Add(Chip("Recommended", filled: false));
+        if (isActive) titleRow.Children.Add(Chip("Active", filled: true));
         info.Children.Add(titleRow);
         info.Children.Add(new TextBlock
         {
             Text = $"{model.Blurb}  ·  {model.SizeLabel} · {model.LanguageLabel}",
             FontSize = 11.5,
-            Foreground = new SolidColorBrush(Color.FromRgb(0x98, 0x93, 0x9F)),
+            Foreground = (Brush)FindResource("MutedBrush"),
             Margin = new Thickness(0, 4, 0, 0),
             TextWrapping = TextWrapping.Wrap,
         });
@@ -567,7 +570,9 @@ public partial class MainWindow : Window
 
         return new Border
         {
-            Background = new SolidColorBrush(Color.FromRgb(0x14, 0x12, 0x1A)),
+            Background = (Brush)FindResource("InputBrush"),
+            BorderBrush = (Brush)FindResource("StrokeBrush"),
+            BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(10),
             Padding = new Thickness(14, 12, 14, 12),
             Margin = new Thickness(0, 0, 0, 8),
@@ -650,13 +655,13 @@ public partial class MainWindow : Window
             {
                 Text = $"{note.Timestamp:g}{app} · {note.WordCount} words · {note.DurationSeconds:0.0}s",
                 FontSize = 10.5,
-                Foreground = new SolidColorBrush(Color.FromRgb(0x6B, 0x66, 0x75)),
+                Foreground = (Brush)FindResource("FaintBrush"),
             });
             info.Children.Add(new TextBlock
             {
                 Text = note.Text,
                 FontSize = 13,
-                Foreground = new SolidColorBrush(Color.FromRgb(0xEC, 0xE8, 0xF6)),
+                Foreground = (Brush)FindResource("TextBrush"),
                 TextWrapping = TextWrapping.Wrap,
                 Margin = new Thickness(0, 6, 0, 0),
             });
@@ -757,7 +762,7 @@ public partial class MainWindow : Window
             {
                 Text = label,
                 FontSize = 13,
-                Foreground = new SolidColorBrush(Color.FromRgb(0xEC, 0xE8, 0xF6)),
+                Foreground = (Brush)FindResource("TextBrush"),
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(12, 0, 12, 0),
                 TextWrapping = TextWrapping.Wrap,
@@ -806,6 +811,25 @@ public partial class MainWindow : Window
         PhraseBox.Focus();
     }
 
+    // ----- Snapshot (hidden diagnostic) -----
+
+    /// <summary>Render every page to PNG; the settings page also at full scroll height.</summary>
+    internal void SnapshotPages(string dir)
+    {
+        var root = (FrameworkElement)Content;
+        var bg = (Brush)FindResource("BgBrush");
+        foreach (var (nav, name) in new[]
+        {
+            (NavHome, "home"), (NavNotes, "notes"), (NavDictionary, "dictionary"), (NavSettings, "settings"),
+        })
+        {
+            nav.IsChecked = true;
+            UpdateLayout();
+            Snapshot.Save(root, System.IO.Path.Combine(dir, $"main-{name}.png"), bg);
+        }
+        Snapshot.Save(SettingsPanel, System.IO.Path.Combine(dir, "main-settings-full.png"), bg);
+    }
+
     // ----- Shared -----
 
     private void UpdateFooter()
@@ -827,14 +851,24 @@ public partial class MainWindow : Window
         VerticalAlignment = VerticalAlignment.Center,
     };
 
-    private static TextBlock Chip(string text, string hex) => new()
+    /// <summary>Filled = white on black (the active state); outlined = quiet label.</summary>
+    private static Border Chip(string text, bool filled) => new()
     {
-        Text = text,
-        FontSize = 10,
-        Foreground = Brushes.White,
-        Padding = new Thickness(7, 2, 7, 3),
+        Child = new TextBlock
+        {
+            Text = text,
+            FontSize = 10,
+            FontWeight = FontWeights.Medium,
+            Foreground = filled
+                ? new SolidColorBrush(Color.FromRgb(0x0A, 0x0A, 0x0A))
+                : new SolidColorBrush(Color.FromRgb(0xC8, 0xC8, 0xC8)),
+        },
+        Background = filled ? Brushes.White : Brushes.Transparent,
+        BorderBrush = filled ? Brushes.White : new SolidColorBrush(Color.FromRgb(0x4A, 0x4A, 0x4A)),
+        BorderThickness = new Thickness(1),
+        CornerRadius = new CornerRadius(6),
+        Padding = new Thickness(7, 1, 7, 2),
         Margin = new Thickness(8, 0, 0, 0),
         VerticalAlignment = VerticalAlignment.Center,
-        Background = (Brush)new BrushConverter().ConvertFromString(hex)!,
     };
 }

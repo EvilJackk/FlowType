@@ -36,6 +36,14 @@ public sealed class DictationSession
     /// </summary>
     private static readonly TimeSpan ModifierGrace = TimeSpan.FromMilliseconds(180);
 
+    /// <summary>
+    /// How long the mic stays open after "stop" is requested. People release
+    /// the key on the last syllable, not after it, so without this the final
+    /// word is routinely clipped ("see you tomor…"). Short enough that the
+    /// result still feels instant; the stop chime plays immediately.
+    /// </summary>
+    private static readonly TimeSpan ReleaseTail = TimeSpan.FromMilliseconds(280);
+
     /// <summary>Virtual-keys that double as shortcut modifiers.</summary>
     private static readonly HashSet<int> ModifierVks = new()
         { 0x10, 0x11, 0x12, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0x5B, 0x5C };
@@ -273,6 +281,9 @@ public sealed class DictationSession
         lock (_ctsGate) _processingCts = cts;
         try
         {
+            // Esc during the tail still works: the recorder stops normally and
+            // the already-cancelled token makes the transcription throw.
+            await Task.Delay(ReleaseTail);
             var take = await AudioRecorder.Instance.StopAsync();
             if (take == null || take.Value.DurationSeconds < MinimumDurationSeconds)
             {

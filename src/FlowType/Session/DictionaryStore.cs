@@ -43,18 +43,38 @@ public sealed class DictionaryStore
         get { lock (_gate) return _entries.ToList(); }
     }
 
-    /// <summary>Words to bias recognition toward (whisper initial prompt).</summary>
+    /// <summary>
+    /// Words to bias recognition toward (whisper initial prompt). Vocabulary
+    /// entries first, then the *targets* of short rewrite rules: a rule like
+    /// "armor forger → Arma Reforger" tells us the user keeps getting that
+    /// name mangled, and the cheapest fix is for the model to hear it right in
+    /// the first place. Long snippets (addresses, boilerplate) are left out so
+    /// they don't crowd the prompt.
+    /// </summary>
     public IReadOnlyList<string> VocabularyWords
     {
         get
         {
             lock (_gate)
             {
-                return _entries
-                    .Where(e => e.Enabled && e.IsVocabularyOnly
-                        && !string.IsNullOrWhiteSpace(e.Phrase))
-                    .Select(e => e.Phrase.Trim())
-                    .ToList();
+                var words = new List<string>();
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                void Add(string text)
+                {
+                    var trimmed = text.Trim();
+                    if (trimmed.Length > 0 && seen.Add(trimmed)) words.Add(trimmed);
+                }
+                foreach (var e in _entries.Where(e => e.Enabled && e.IsVocabularyOnly)) Add(e.Phrase);
+                foreach (var e in _entries.Where(e => e.Enabled && !e.IsVocabularyOnly))
+                {
+                    var target = e.Replacement.Trim();
+                    var isShortName = target.Length <= 40
+                        && target.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length <= 4
+                        && target.Any(char.IsLetter)
+                        && !target.Contains('@') && !target.Contains("://");
+                    if (isShortName) Add(target);
+                }
+                return words;
             }
         }
     }
