@@ -11,6 +11,7 @@ license, reproduced or linked below. FlowType itself is MIT licensed — see
 | OpenAI Whisper models | MIT | https://github.com/openai/whisper |
 | NAudio | MIT | https://github.com/naudio/NAudio |
 | .NET runtime & WPF | MIT | https://github.com/dotnet/runtime |
+| Microsoft Visual C++ Runtime (`msvcp140.dll`, `vcruntime140.dll`, `vcruntime140_1.dll`, `vcomp140.dll`) | Microsoft Distributable Code — redistributable with the application | https://learn.microsoft.com/cpp/windows/redistributing-visual-cpp-files |
 | Satoshi typeface | Fontshare Free License | https://www.fontshare.com/fonts/satoshi |
 | Clash Display typeface | Fontshare Free License | https://www.fontshare.com/fonts/clash-display |
 

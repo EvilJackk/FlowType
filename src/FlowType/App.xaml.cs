@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Text;
 using System.Windows;
 using FlowType.Audio;
@@ -46,6 +46,19 @@ public partial class App : Application
         if (e.Args.Contains("--keylog"))
         {
             RunKeyLog();
+            return;
+        }
+
+        if (e.Args.Contains("--pastetest"))
+        {
+            RunPasteTest();
+            return;
+        }
+
+        var conditionIndex = Array.IndexOf(e.Args, "--conditioncheck");
+        if (conditionIndex >= 0)
+        {
+            RunConditionCheck(e.Args.ElementAtOrDefault(conditionIndex + 1) ?? "");
             return;
         }
 
@@ -441,7 +454,7 @@ public partial class App : Application
 
                 foreach (var accurate in new[] { false, true })
                 {
-                    int errors = 0, words = 0;
+                    int errors = 0, words = 0, rejected = 0;
                     long totalMs = 0, maxMs = 0;
                     var byCondition = new Dictionary<string, (int Err, int Words)>();
                     var clipResults = new List<(int Err, string Name, string Hyp)>();
@@ -449,9 +462,14 @@ public partial class App : Application
                     {
                         var reference = File.ReadAllText(Path.ChangeExtension(clip, ".txt"));
                         var sw = System.Diagnostics.Stopwatch.StartNew();
-                        var hyp = await Transcriber.Instance.TranscribeAsync(
+                        var result = await Transcriber.Instance.TranscribeAsync(
                             clip, "en", Array.Empty<string>(), default, accurate);
                         sw.Stop();
+                        var hyp = result.Text;
+                        // A clip the pre-model gate threw away is a total loss:
+                        // counting them separately is how a too-eager silence
+                        // gate gets caught before it ships.
+                        if (result.Verdict is TakeVerdict.NoSpeech or TakeVerdict.NoInput) rejected++;
                         var (err, n) = WordErrorRate.Count(reference, hyp);
                         errors += err; words += n;
                         totalMs += sw.ElapsedMilliseconds; maxMs = Math.Max(maxMs, sw.ElapsedMilliseconds);
@@ -466,7 +484,8 @@ public partial class App : Application
                     var perCond = string.Join("  ", byCondition.OrderBy(k => k.Key)
                         .Select(k => $"{k.Key}={100.0 * k.Value.Err / Math.Max(1, k.Value.Words):0.0}%"));
                     log.AppendLine($"{model.Id,-22} {mode,-9} {100.0 * errors / Math.Max(1, words),6:0.0}% " +
-                        $"{totalMs / clips.Length,8} {maxMs,8}  {perCond}");
+                        $"{totalMs / clips.Length,8} {maxMs,8}  {perCond}" +
+                        (rejected > 0 ? $"  REJECTED {rejected}/{clips.Length}" : ""));
 
                     worst.AppendLine($"-- {model.Id} / {mode}: worst clips");
                     foreach (var (err, name, hyp) in clipResults.OrderByDescending(c => c.Err).Take(3))
@@ -504,6 +523,193 @@ public partial class App : Application
     // ----- Self-test (hidden diagnostic: FlowType.exe --selftest) -----
 
     /// <summary>
+    /// Runs the conditioner alone over a folder of 16 kHz WAVs and reports what
+    /// it decided for each — verdict, gain, how much tail it trimmed. Seconds
+    /// rather than the minutes <c>--bench</c> takes, so a threshold change can
+    /// be checked against a whole corpus before spending a decode run on it.
+    /// Writes %APPDATA%\FlowType\conditioncheck.txt.
+    /// </summary>
+    private void RunConditionCheck(string folder)
+    {
+        var log = new StringBuilder();
+        try
+        {
+            var clips = Directory.Exists(folder)
+                ? Directory.GetFiles(folder, "*.wav").OrderBy(f => f).ToArray()
+                : Array.Empty<string>();
+            log.AppendLine($"FlowType condition check — {clips.Length} clips in {folder}");
+            log.AppendLine();
+            log.AppendLine($"{"clip",-24} {"verdict",-10} {"gain",6} {"trim ms",8} {"rms",9} {"peak",7} " +
+                $"{"msVoice",8} {"modul",6}");
+
+            var rejected = 0;
+            var trimmed = 0;
+            var boosted = 0;
+            foreach (var clip in clips)
+            {
+                var take = AudioConditioner.Prepare(Transcriber.ReadSamples(clip));
+                var m = take.Metrics;
+                if (!take.ShouldTranscribe) rejected++;
+                if (m.TrimmedMs > 0) trimmed++;
+                if (m.AppliedGain > 10.001f) boosted++;
+                log.AppendLine($"{Path.GetFileNameWithoutExtension(clip),-24} {take.Verdict,-10} " +
+                    $"{m.AppliedGain,6:0.00} {m.TrimmedMs,8} {m.Rms,9:0.00000} {m.Peak,7:0.000} " +
+                    $"{m.MsAboveVoiceFloor,8} {m.SpeechLikeModulation,6}");
+            }
+
+            log.AppendLine();
+            log.AppendLine($"rejected {rejected}/{clips.Length}, trimmed {trimmed}, " +
+                $"boosted past 10x {boosted}");
+        }
+        catch (Exception ex)
+        {
+            log.AppendLine($"CONDITIONCHECK FAILED: {ex}");
+        }
+        finally
+        {
+            AppPaths.EnsureCreated();
+            File.WriteAllText(Path.Combine(AppPaths.DataDir, "conditioncheck.txt"), log.ToString());
+            Shutdown();
+        }
+    }
+
+    /// <summary>
+    /// Exercises the receipt-sequenced clipboard paste end to end without
+    /// firing Ctrl+V into whatever the user has focused: the transaction is run
+    /// with the chord suppressed and this process reads the clipboard instead,
+    /// which is the same GetClipboardData call a target application makes and
+    /// therefore produces the same read receipt.
+    /// Writes %APPDATA%\FlowType\pastetest.txt.
+    /// </summary>
+    private async void RunPasteTest()
+    {
+        var log = new StringBuilder();
+        var pass = 0;
+        var fail = 0;
+
+        void Check(string label, bool ok, string detail)
+        {
+            if (ok) pass++; else fail++;
+            log.AppendLine($"{(ok ? "PASS" : "FAIL")} [{label}] {detail}");
+        }
+
+        ReliablePaste.Tracing = true;
+        // The test scribbles all over the clipboard; put back whatever the user
+        // actually had there.
+        var userClipboard = ReliablePaste.ReadClipboardAsConsumer();
+        try
+        {
+            const string previous = "FLOWTYPE-PREVIOUS-CLIPBOARD";
+            const string transcript = "the quick brown fox — ünïcödé ✓";
+
+            // 1. Reader present, restore on: the target gets the transcript and
+            //    the user gets their clipboard back.
+            Check("seed", ReliablePaste.SeedClipboard(previous),
+                $"clipboard = '{ReliablePaste.ReadClipboardAsConsumer()}'");
+
+            var started = await ReliablePaste.PasteAsync(transcript, restoreClipboard: true, sendChord: false);
+            Check("transaction started", started, "");
+
+            var readBack = ReliablePaste.ReadClipboardAsConsumer();
+            Check("target reads transcript", readBack == transcript, $"got '{readBack}'");
+
+            await Task.Delay(700);      // quiet period (200 ms) plus margin
+            var restored = ReliablePaste.ReadClipboardAsConsumer();
+            Check("clipboard restored", restored == previous, $"got '{restored}'");
+
+            // 2. Restore off: the transcript is meant to stay on the clipboard.
+            ReliablePaste.SeedClipboard(previous);
+            await ReliablePaste.PasteAsync(transcript, restoreClipboard: false, sendChord: false);
+            var kept = ReliablePaste.ReadClipboardAsConsumer();
+            await Task.Delay(700);
+            var stillKept = ReliablePaste.ReadClipboardAsConsumer();
+            Check("transcript kept when restore is off",
+                kept == transcript && stillKept == transcript, $"got '{stillKept}'");
+
+            // 3. Nobody ever reads it: the promise must still become real text
+            //    rather than leaving an empty handle on the clipboard.
+            ReliablePaste.SeedClipboard(previous);
+            await ReliablePaste.PasteAsync(transcript, restoreClipboard: false, sendChord: false);
+            await Task.Delay(9000);     // past the 8 s restore timeout
+            var afterTimeout = ReliablePaste.ReadClipboardAsConsumer();
+            Check("unread promise materialises", afterTimeout == transcript, $"got '{afterTimeout}'");
+
+            log.AppendLine(fail == 0 ? "PASTETEST OK" : "PASTETEST FAILED");
+        }
+        catch (Exception ex)
+        {
+            log.AppendLine($"PASTETEST FAILED: {ex}");
+        }
+        finally
+        {
+            if (userClipboard != null) ReliablePaste.SeedClipboard(userClipboard);
+            log.AppendLine();
+            log.AppendLine("trace:");
+            lock (ReliablePaste.Trace)
+            {
+                foreach (var line in ReliablePaste.Trace) log.AppendLine($"  {line}");
+            }
+            AppPaths.EnsureCreated();
+            File.WriteAllText(Path.Combine(AppPaths.DataDir, "pastetest.txt"), log.ToString());
+            Shutdown();
+        }
+    }
+
+    /// <summary>Show line breaks in a one-line test log.</summary>
+    private static string Escape(string text) =>
+        text.Replace("\r", "\\r").Replace("\n", "\\n").Replace("\t", "\\t");
+
+    // ----- Synthetic signals for the conditioning vectors -----
+    // Deterministic (no Random) so a failure is always reproducible.
+
+    private static float SelfTestNoiseSample(int i)
+    {
+        unchecked
+        {
+            var h = (uint)i * 2654435761u;
+            h ^= h >> 13;
+            h *= 2246822519u;
+            h ^= h >> 16;
+            return h / (float)uint.MaxValue * 2f - 1f;
+        }
+    }
+
+    private static float[] SelfTestNoise(double seconds, float rms)
+    {
+        var n = new float[(int)(seconds * AudioConditioner.SampleRate)];
+        var amplitude = rms * MathF.Sqrt(3f);   // uniform noise in [-a,a] has rms a/sqrt(3)
+        for (var i = 0; i < n.Length; i++) n[i] = SelfTestNoiseSample(i) * amplitude;
+        return n;
+    }
+
+    private static float[] SelfTestTone(double seconds, float amplitude, double hz = 220)
+    {
+        var n = new float[(int)(seconds * AudioConditioner.SampleRate)];
+        for (var i = 0; i < n.Length; i++)
+        {
+            n[i] = amplitude * (float)Math.Sin(2 * Math.PI * hz * i / AudioConditioner.SampleRate);
+        }
+        return n;
+    }
+
+    /// <summary>Bursts of energy separated by near-silence — the envelope of speech.</summary>
+    private static float[] SelfTestSpeech(double seconds, float peak)
+    {
+        var rate = AudioConditioner.SampleRate;
+        var n = new float[(int)(seconds * rate)];
+        var period = (int)(0.5 * rate);
+        var burst = (int)(0.3 * rate);
+        for (var i = 0; i < n.Length; i++)
+        {
+            var envelope = i % period < burst
+                ? peak * (0.55f + 0.45f * MathF.Sin(i / 300f))
+                : peak * 0.004f;
+            n[i] = SelfTestNoiseSample(i + 7919) * envelope;
+        }
+        return n;
+    }
+
+    /// <summary>
     /// Headless pipeline check: settings → model load → 2s mic capture →
     /// transcription → formatter test vectors. Writes %APPDATA%\FlowType\selftest.txt.
     /// </summary>
@@ -533,34 +739,66 @@ public partial class App : Application
                 AudioRecorder.Instance.StartRecording();
                 await Task.Delay(2000);
                 var take = await AudioRecorder.Instance.StopAsync();
-                log.AppendLine($"recording: duration={take?.DurationSeconds:0.00}s");
+                log.AppendLine($"recording: duration={take?.DurationSeconds:0.00}s " +
+                    $"outcome={take?.Outcome} callbackFaults={AudioRecorder.Instance.CallbackFaults}");
                 if (take != null)
                 {
                     var sw = System.Diagnostics.Stopwatch.StartNew();
-                    var raw = await Transcriber.Instance.TranscribeAsync(
+                    var result = await Transcriber.Instance.TranscribeAsync(
                         take.Value.Path, s.Language, DictionaryStore.Instance.VocabularyWords);
                     sw.Stop();
-                    log.AppendLine($"transcribe: {sw.ElapsedMilliseconds}ms text='{raw}'");
+                    log.AppendLine($"transcribe: {sw.ElapsedMilliseconds}ms verdict={result.Verdict} " +
+                        $"rms={result.Metrics.Rms:0.0000} peak={result.Metrics.Peak:0.000} " +
+                        $"gain={result.Metrics.AppliedGain:0.0} trimmed={result.Metrics.TrimmedMs}ms " +
+                        $"text='{result.Text}'");
                     AudioRecorder.TryDelete(take.Value.Path);
                 }
             }
 
-            // Audio conditioning: silence is rejected, short takes are padded
-            // past whisper.cpp's 1 s floor, quiet takes are lifted.
-            var silent = AudioConditioner.Prepare(new float[8000]);
-            var quiet = new float[4000];
-            for (var i = 0; i < quiet.Length; i++) quiet[i] = 0.05f * (float)Math.Sin(i * 0.3);
-            var lifted = AudioConditioner.Prepare(quiet);
-            var conditionOk = silent.Length == 0
-                && lifted.Length >= AudioConditioner.SampleRate * 1.2
-                && AudioConditioner.Peak(lifted) > 0.8f;
-            log.AppendLine($"conditioning {(conditionOk ? "PASS" : "FAIL")}: silent->{silent.Length} samples, " +
-                $"quiet 0.25s->{lifted.Length} samples peak {AudioConditioner.Peak(lifted):0.00}");
+            // Audio conditioning. The cases that matter: a dead microphone and
+            // room tone are rejected before the model (both used to be
+            // transcribed into invented text), a steady tone never unlocks the
+            // big gain, real speech does, short takes are padded past
+            // whisper.cpp's 1 s floor, and a long silent tail is trimmed.
+            var conditionResults = new List<(string Name, bool Ok, string Detail)>();
+            void Condition(string name, float[] input, Func<ConditionedTake, bool> assert)
+            {
+                var take = AudioConditioner.Prepare(input);
+                var ok = assert(take);
+                conditionResults.Add((name, ok,
+                    $"verdict={take.Verdict} samples={take.Samples.Length} " +
+                    $"rms={take.Metrics.Rms:0.00000} peak={take.Metrics.Peak:0.000} " +
+                    $"gain={take.Metrics.AppliedGain:0.0} trimmed={take.Metrics.TrimmedMs}ms"));
+            }
+
+            Condition("dead mic", new float[AudioConditioner.SampleRate * 2],
+                t => t.Verdict == TakeVerdict.NoInput && !t.ShouldTranscribe);
+            Condition("room tone", SelfTestNoise(2.0, 0.0007f),
+                t => t.Verdict == TakeVerdict.NoSpeech && !t.ShouldTranscribe);
+            Condition("steady tone not boosted", SelfTestTone(2.0, 0.02f),
+                t => t.ShouldTranscribe && !t.Metrics.SpeechLikeModulation && t.Metrics.AppliedGain <= 16.001f);
+            Condition("faint speech boosted", SelfTestSpeech(2.0, 0.02f),
+                t => t.Verdict == TakeVerdict.Speech && t.Metrics.SpeechLikeModulation
+                    && t.Metrics.AppliedGain > 16f);
+            Condition("short take padded", SelfTestSpeech(0.45, 0.2f),
+                t => t.Samples.Length >= (int)(1.25 * AudioConditioner.SampleRate));
+            Condition("silent tail trimmed",
+                SelfTestSpeech(1.5, 0.2f).Concat(new float[AudioConditioner.SampleRate * 3]).ToArray(),
+                t => t.Metrics.TrimmedMs > 2000);
+
+            var conditionOk = conditionResults.All(r => r.Ok);
+            foreach (var (name, ok, detail) in conditionResults)
+            {
+                log.AppendLine($"conditioning {(ok ? "PASS" : "FAIL")} [{name}]: {detail}");
+            }
 
             // Formatter vectors — every Wispr-style transform in one pass.
+            // Language is the *decoded* language now, not the setting: the
+            // English filler list only runs on evidence of English.
             var opts = new FormatterOptions(
                 RemoveFillers: true, ScratchThat: true, LineCommands: true,
-                PunctuationCommands: false, SmartTrailingPunctuation: true);
+                PunctuationCommands: false, SmartTrailingPunctuation: true,
+                Language: "en");
             var vectors = new (string Input, string Expected)[]
             {
                 ("Um, hello world, uh, this is great.", "Hello world, this is great."),
@@ -569,6 +807,14 @@ public partial class App : Application
                 ("this is wrong, scratch that, this is right.", "This is right."),
                 ("First point. New paragraph. Second point.", "First point.\n\nSecond point."),
                 ("Hello there.", "Hello there."),
+                // Fillers beyond um/uh, and the guards that keep real words.
+                ("Hmm, ehm, so I was ah thinking.", "So I was thinking."),
+                ("The gap is 5 mm across.", "The gap is 5 mm across."),
+                ("Ah-ha, that explains it.", "Ah-ha, that explains it."),
+                // Nothing but a filler: keep what was said rather than typing
+                // nothing. (The trailing period goes the way it does for any
+                // single-token dictation — see StripSmartTrailingPeriod.)
+                ("Hmm.", "Hmm"),
             };
             var pass = 0;
             foreach (var (input, expected) in vectors)
@@ -628,6 +874,8 @@ public partial class App : Application
                     "Let me know if the following is American English or something else entirely, please."),
                 ("John Smith Acme Corp", "John Smith Acme Corp"),
                 ("John Smith, Acme Corp, Arma Reforger, FigJam.", ""),
+                // Whisper's stutter on a hesitant start.
+                ("I I I I think so.", "I think so."),
             };
             var guardPass = 0;
             foreach (var (input, expected) in guardVectors)
@@ -640,9 +888,318 @@ public partial class App : Application
             }
             log.AppendLine($"hallucination guard: {guardPass}/{guardVectors.Length} passed");
 
+            // The attempt log: exactly one line per attempt, on every exit path
+            // including a throw, and never any transcript text in it.
+            var logPath = AppPaths.AttemptLog;
+            var linesBefore = File.Exists(logPath) ? File.ReadAllLines(logPath).Length : 0;
+            const string canary = "CANARY-TRANSCRIPT-TEXT";
+            try
+            {
+                using var probe = new DictationAttempt { AppName = "selftest" };
+                probe.RawLength = canary.Length;
+                throw new InvalidOperationException("selftest");
+            }
+            catch (InvalidOperationException) { }
+            var linesAfter = File.Exists(logPath) ? File.ReadAllLines(logPath) : Array.Empty<string>();
+            var attemptOk = linesAfter.Length == linesBefore + 1
+                && linesAfter[^1].Contains("AbortedBeforeResult")
+                && !linesAfter.Any(l => l.Contains(canary));
+            log.AppendLine($"attempt log {(attemptOk ? "PASS" : "FAIL")}: " +
+                $"{linesBefore} -> {linesAfter.Length} lines");
+
+            // Does the library actually report a decoded language? The filler
+            // gate now depends on it, so this is checked, not assumed.
+            var probed = Transcriber.Instance.IsReady
+                ? await Transcriber.Instance.ProbeLanguageAsync()
+                : null;
+            log.AppendLine($"language read-back: '{probed ?? "(none)"}' " +
+                (probed == "en" ? "PASS" : "CHECK — long auto-language takes will fall back"));
+
+            // Language evidence. The English filler list must run on English
+            // and on an English-only model with no answer, and must not touch
+            // a language whose "um" is a real word.
+            var languageVectors = new (string Setting, bool EnglishOnly, double Seconds, string? Last, string Expected)[]
+            {
+                ("auto", false, 2.0, "en", "en"),
+                ("auto", false, 30.0, "en", "auto"),
+                ("auto", false, 2.0, null, "en"),
+                ("de", true, 30.0, null, "en"),
+                ("de", false, 2.0, "en", "de"),
+            };
+            var languagePass = 0;
+            foreach (var (setting, englishOnly, seconds, last, expected) in languageVectors)
+            {
+                var actual = Transcriber.ResolveLanguage(setting, englishOnly, seconds, last);
+                var ok = actual == expected;
+                if (ok) languagePass++;
+                log.AppendLine($"language {(ok ? "PASS" : "FAIL")}: " +
+                    $"({setting}, en-only={englishOnly}, {seconds}s, last={last ?? "null"}) -> {actual}" +
+                    (ok ? "" : $" (expected {expected})"));
+            }
+
+            var ptOpts = opts with { Language = "pt" };
+            var unknownMultilingual = opts with { Language = "", EnglishOnlyModel = false };
+            var unknownEnglishModel = opts with { Language = "", EnglishOnlyModel = true };
+            const string portuguese = "eu vi um carro na rua";
+            var fillerGateOk =
+                TextFormatter.Apply(portuguese, ptOpts) == "Eu vi um carro na rua"
+                && TextFormatter.Apply(portuguese, unknownMultilingual) == "Eu vi um carro na rua"
+                && TextFormatter.Apply("um, hello there", unknownEnglishModel) == "Hello there"
+                && TextFormatter.Apply("hmm, ok then", ptOpts) == "Ok then";
+            if (fillerGateOk) languagePass++;
+            log.AppendLine($"filler gate {(fillerGateOk ? "PASS" : "FAIL")}: " +
+                $"pt='{TextFormatter.Apply(portuguese, ptOpts)}' " +
+                $"unknown='{TextFormatter.Apply(portuguese, unknownMultilingual)}'");
+            log.AppendLine($"language evidence: {languagePass}/{languageVectors.Length + 1} passed");
+
+            // Sentence-boundary space, and the structural guard that keeps the
+            // tidy-up passes away from dictated code.
+            var spaceVectors = new (string Input, string Expected)[]
+            {
+                ("one two three.", "one two three. "),
+                ("Done!", "Done! "),
+                ("Really?", "Really? "),
+                ("He said \"yes.\"", "He said \"yes.\" "),
+                ("Hello world,", "Hello world,"),
+                ("no punctuation", "no punctuation"),
+                ("https://example.com.", "https://example.com."),
+                ("mail me at roy@example.com.", "mail me at roy@example.com."),
+                ("visit example.com.", "visit example.com."),
+                ("x = y.", "x = y."),
+                ("line one\nline two.", "line one\nline two."),
+                ("", ""),
+            };
+            var spacePass = 0;
+            foreach (var (input, expected) in spaceVectors)
+            {
+                var actual = TextFormatter.WithSentenceSpace(input);
+                var ok = actual == expected;
+                if (ok) spacePass++;
+                log.AppendLine($"space {(ok ? "PASS" : "FAIL")}: '{Escape(input)}' -> '{Escape(actual)}'" +
+                    (ok ? "" : $" (expected '{Escape(expected)}')"));
+            }
+            log.AppendLine($"trailing space: {spacePass}/{spaceVectors.Length} passed");
+
+            var structuralVectors = new (string Input, string Expected)[]
+            {
+                ("hello  ,  world", "hello  ,  world"),
+                ("let x  =  1", "let x  =  1"),
+                ("foo :: bar", "foo :: bar"),
+                ("run `npm  test` now", "run `npm  test` now"),
+                ("Um, hello world, uh, this is great.", "Hello world, this is great."),
+            };
+            var structuralPass = 0;
+            foreach (var (input, expected) in structuralVectors)
+            {
+                var actual = TextFormatter.Apply(input, opts);
+                var ok = actual == expected;
+                if (ok) structuralPass++;
+                log.AppendLine($"structural {(ok ? "PASS" : "FAIL")}: '{Escape(input)}' -> '{Escape(actual)}'" +
+                    (ok ? "" : $" (expected '{Escape(expected)}')"));
+            }
+            log.AppendLine($"structural guard: {structuralPass}/{structuralVectors.Length} passed");
+
+            // Non-speech markers. Whisper's own annotations go; bracketed text
+            // the user actually dictated stays.
+            var markerVectors = new (string Input, string Expected)[]
+            {
+                ("[BLANK_AUDIO]", ""),
+                // Not whisper's exact form, so it is the user's own text (trimmed).
+                (" [ blank_audio ] ", "[ blank_audio ]"),
+                ("(silence)", ""),
+                ("The intro has [MUSIC] before speech.", "The intro has before speech."),
+                ("See note [1] and [2].", "See note [1] and [2]."),
+                ("add a footnote [sic] there", "add a footnote [sic] there"),
+                ("Compare a[0] to a[1].", "Compare a[0] to a[1]."),
+                // The blank line "new paragraph" produces must survive: the old
+                // \s{2,} collapse ate it.
+                ("Line one\n\nLine two", "Line one\n\nLine two"),
+                ("♪ la la ♪", "la la"),
+            };
+            var markerPass = 0;
+            foreach (var (input, expected) in markerVectors)
+            {
+                var actual = Transcriber.CleanNonSpeechMarkers(input);
+                var ok = actual == expected;
+                if (ok) markerPass++;
+                log.AppendLine($"marker {(ok ? "PASS" : "FAIL")}: '{Escape(input)}' -> " +
+                    $"'{Escape(actual)}'" + (ok ? "" : $" (expected '{Escape(expected)}')"));
+            }
+            log.AppendLine($"non-speech markers: {markerPass}/{markerVectors.Length} passed");
+
+            // Decode budget: generous enough never to cut a working decode short,
+            // bounded enough that a wedge cannot strand the session.
+            var budgetVectors = new (double Seconds, int Expected)[]
+            {
+                (1.0, 180), (10.0, 180), (30.0, 180), (60.0, 300), (435.0, 1800), (600.0, 1800),
+            };
+            var budgetPass = 0;
+            foreach (var (seconds, expected) in budgetVectors)
+            {
+                var actual = (int)Transcriber.DecodeBudget(seconds).TotalSeconds;
+                var ok = actual == expected;
+                if (ok) budgetPass++;
+                log.AppendLine($"budget {(ok ? "PASS" : "FAIL")}: {seconds}s -> {actual}s" +
+                    (ok ? "" : $" (expected {expected}s)"));
+            }
+            log.AppendLine($"decode budget: {budgetPass}/{budgetVectors.Length} passed");
+
+            // Fuzzy vocabulary. The first half must be corrected; the second
+            // half is ordinary prose that must survive untouched — that is the
+            // half that catches an over-eager matcher.
+            var terms = new[] { "Arma Reforger", "Enfusion", "Workbench", "Nightjar", "FlowType" };
+            var vocabVectors = new (string Input, string Expected)[]
+            {
+                ("I was playing Armour Forger last night.", "I was playing Arma Reforger last night."),
+                ("open Arma Reforge and load the mod", "open Arma Reforger and load the mod"),
+                ("the in fusion engine", "the Enfusion engine"),
+                ("open work bench now", "open Workbench now"),
+                ("flow type is running", "FlowType is running"),
+                ("I LOVE ARMOUR FORGER!", "I LOVE ARMA REFORGER!"),
+                ("we are going to the workshop tomorrow", "we are going to the workshop tomorrow"),
+                ("the reform of the workplace bench marking process",
+                    "the reform of the workplace bench marking process"),
+                ("I need to fix the armour on that vehicle.", "I need to fix the armour on that vehicle."),
+                ("mail me at roy@example.com today", "mail me at roy@example.com today"),
+                ("she reforged the sword at the forge", "she reforged the sword at the forge"),
+            };
+            var vocabPass = 0;
+            foreach (var (input, expected) in vocabVectors)
+            {
+                var actual = VocabularyMatcher.Apply(input, terms);
+                var ok = actual == expected;
+                if (ok) vocabPass++;
+                log.AppendLine($"vocabulary {(ok ? "PASS" : "FAIL")}: '{actual}'" +
+                    (ok ? "" : $" (expected '{expected}')"));
+            }
+            log.AppendLine($"fuzzy vocabulary: {vocabPass}/{vocabVectors.Length} passed");
+
+            // The wiring itself: the live settings must actually carry the
+            // dictionary into the formatter, which is where the fuzzy pass runs
+            // during a real dictation.
+            var wired = TextFormatter.Apply(
+                "um, I was playing armour forger last night",
+                FormatterOptions.FromSettings(terms, decodedLanguage: "en"));
+            var wiringOk = wired == "I was playing Arma Reforger last night";
+            log.AppendLine($"formatter wiring {(wiringOk ? "PASS" : "FAIL")}: '{wired}'");
+
+            // Dictionary rules: they rewrite prose, never the inside of an
+            // address or a link.
+            var rules = new List<DictionaryEntry>
+            {
+                new() { Phrase = "figjam", Replacement = "FigJam" },
+                new() { Phrase = "my email", Replacement = "roy@example.com" },
+                new() { Phrase = "type", Replacement = "Type" },
+            };
+            var ruleVectors = new (string Input, string Expected)[]
+            {
+                ("open figjam please", "open FigJam please"),
+                ("send it to my email", "send it to roy@example.com"),
+                ("mail me at roy@type.com now", "mail me at roy@type.com now"),
+                ("see https://example.com/type today", "see https://example.com/type today"),
+                ("the type of file", "the Type of file"),
+                ("figjam", "FigJam"),
+            };
+            // Rules must not feed each other, and the longest match must win.
+            var cascadeRules = new List<DictionaryEntry>
+            {
+                new() { Phrase = "react", Replacement = "React" },
+                new() { Phrase = "React", Replacement = "React.js" },
+            };
+            var longestRules = new List<DictionaryEntry>
+            {
+                new() { Phrase = "typer", Replacement = "Typer" },
+                new() { Phrase = "voice typer", Replacement = "FlowType" },
+            };
+            var dollarRules = new List<DictionaryEntry>
+            {
+                new() { Phrase = "the price", Replacement = "$1 and $2" },
+            };
+            var spaceRules = new List<DictionaryEntry>
+            {
+                new() { Phrase = "-", Replacement = " ", MatchWholeWord = false },
+            };
+            var ruleExtraOk =
+                DictionaryStore.ApplyRules("i use react daily", cascadeRules) == "i use React daily"
+                && DictionaryStore.ApplyRules("voice typer here", longestRules) == "FlowType here"
+                && DictionaryStore.ApplyRules("the price today", dollarRules) == "$1 and $2 today"
+                && DictionaryStore.ApplyRules("state-of-the-art", spaceRules) == "state of the art"
+                && !DictionaryStore.SectionsFor(spaceRules).Spellings.Contains("-");
+            log.AppendLine($"dictionary extras {(ruleExtraOk ? "PASS" : "FAIL")}: " +
+                $"cascade='{DictionaryStore.ApplyRules("i use react daily", cascadeRules)}' " +
+                $"longest='{DictionaryStore.ApplyRules("voice typer here", longestRules)}' " +
+                $"dollar='{DictionaryStore.ApplyRules("the price today", dollarRules)}' " +
+                $"dehyphen='{DictionaryStore.ApplyRules("state-of-the-art", spaceRules)}'");
+            var rulePass = 0;
+            foreach (var (input, expected) in ruleVectors)
+            {
+                var actual = DictionaryStore.ApplyRules(input, rules);
+                var ok = actual == expected;
+                if (ok) rulePass++;
+                log.AppendLine($"dictionary {(ok ? "PASS" : "FAIL")}: '{actual}'" +
+                    (ok ? "" : $" (expected '{expected}')"));
+            }
+            log.AppendLine($"dictionary rules: {rulePass}/{ruleVectors.Length} passed");
+
+            // What the dictionary tells the recogniser, split by role. Spoken
+            // forms must reach the prompt and must NOT reach the fuzzy matcher,
+            // which would otherwise rewrite correct text into the mis-hearing.
+            var sectionFixture = new List<DictionaryEntry>
+            {
+                new() { Phrase = "armor forger", Replacement = "Arma Reforger" },
+                new() { Phrase = "FigJam", Replacement = "" },
+                new() { Phrase = "figjam", Replacement = "FigJam" },   // casing-only: no spoken form
+                new() { Phrase = "my email", Replacement = "roy@example.com" },
+            };
+            var sections = DictionaryStore.SectionsFor(sectionFixture);
+            var sectionsOk =
+                sections.Spellings.Contains("Arma Reforger")
+                && sections.Spellings.Contains("FigJam")
+                && !sections.Spellings.Contains("armor forger")
+                && !sections.Spellings.Any(t => t.Contains('@'))
+                && sections.SpokenForms.Contains("armor forger")
+                && !sections.SpokenForms.Contains("figjam")
+                && !sections.SpokenForms.Contains("my email");
+            log.AppendLine($"dictionary sections {(sectionsOk ? "PASS" : "FAIL")}: " +
+                $"spellings=[{string.Join(", ", sections.Spellings)}] " +
+                $"spoken=[{string.Join(", ", sections.SpokenForms)}]");
+
+            // The initial prompt must stay inside whisper's window. Whisper keeps
+            // the *tail* of an over-long prompt, so the spellings — the half that
+            // must survive — are rendered last.
+            var longVocabulary = Enumerable.Range(0, 200).Select(i => $"Term{i:000}").ToArray();
+            var builtPrompt = Transcriber.BuildPrompt(
+                EnglishVariant.RecognitionPrompt(EnglishVariant.Us),
+                longVocabulary, new[] { "spoken one", "spoken two" }) ?? "";
+            var shortPrompt = Transcriber.BuildPrompt(
+                null, new[] { "Arma Reforger" }, new[] { "armor forger" }) ?? "";
+            var promptOk = builtPrompt.Length <= Transcriber.MaxPromptChars
+                && builtPrompt.Contains("American")
+                && builtPrompt.Contains("Preferred spellings:")
+                && builtPrompt.EndsWith('.')
+                && builtPrompt.IndexOf("Possible spoken forms:", StringComparison.Ordinal)
+                    < builtPrompt.IndexOf("Preferred spellings:", StringComparison.Ordinal)
+                && shortPrompt == "Possible spoken forms: armor forger. Preferred spellings: Arma Reforger."
+                && Transcriber.SanitizeTerm("Mac Book\n Pro\0") == "Mac Book Pro"
+                && Transcriber.BuildPrompt(null, Array.Empty<string>()) == null;
+            log.AppendLine($"prompt {(promptOk ? "PASS" : "FAIL")}: {builtPrompt.Length} chars " +
+                $"(cap {Transcriber.MaxPromptChars}); short='{shortPrompt}'");
+
             var allPassed = pass == vectors.Length
                 && variantPass == variantVectors.Length
                 && guardPass == guardVectors.Length
+                && vocabPass == vocabVectors.Length
+                && rulePass == ruleVectors.Length
+                && ruleExtraOk
+                && sectionsOk
+                && attemptOk
+                && languagePass == languageVectors.Length + 1
+                && spacePass == spaceVectors.Length
+                && structuralPass == structuralVectors.Length
+                && markerPass == markerVectors.Length
+                && budgetPass == budgetVectors.Length
+                && wiringOk
+                && promptOk
                 && conditionOk
                 && Transcriber.Instance.IsReady;
             log.AppendLine(allPassed ? "SELFTEST OK" : "SELFTEST INCOMPLETE");

@@ -1,4 +1,4 @@
-<div align="center">
+﻿<div align="center">
 
 # FlowType
 
@@ -85,19 +85,23 @@ Say **"scratch that"** to drop everything before it, **"new line"** /
 
 Two things matter far more than any other setting:
 
-1. **Model size.** `Small` handles clear speech well; `Turbo · Full` (1.6 GB)
-   is in a different league on quiet, rushed or mumbled speech and on strong
-   accents, and on any dedicated GPU it is still faster than Small on a CPU.
-   FlowType recommends it automatically when it sees a discrete GPU.
-   `Large · Maximum` squeezes out a little more on the hardest audio at
-   several times the latency.
+1. **Model size.** `Small` handles clear speech well. On a dedicated GPU,
+   FlowType recommends `Large · Maximum` (1.1 GB): in FlowType's own benchmark
+   it makes about a third of Turbo's errors on mumbled speech, for roughly
+   twice the wait. `Turbo · Full` (1.6 GB) is the faster pick and still far
+   ahead of Small on unclear speech and strong accents.
 2. **Accurate decoding** (Settings → AI model, on by default) — beam search
    instead of the first guess. Free on a GPU, ~1.5–2× slower on CPU.
 
-Add recurring proper nouns to the Dictionary — vocabulary entries are fed to
-the recognizer and noticeably improve names it keeps mangling.
+Add recurring proper nouns to the Dictionary. Entries are fed to the recognizer
+so it hears them correctly in the first place, and *Fix near-misses of your
+dictionary words automatically* (Settings → Formatting) catches the ones it
+still mangles — matching by sound as well as spelling, so one entry covers
+every variation.
 
-To measure instead of guess: `FlowType.exe --bench <folder>` transcribes every
+To measure instead of guess: `FlowType.exe --conditioncheck <folder>` reports
+what the audio gate decided for a folder of recordings in seconds, and
+`FlowType.exe --bench <folder>` transcribes every
 `.wav` (16 kHz mono) that has a sibling `.txt` reference with each downloaded
 model in both decoding modes and writes word-error rates and timings to
 `%APPDATA%\FlowType\bench.txt`.
@@ -132,12 +136,17 @@ pwsh build/publish.ps1
 - **Nothing inserted in a specific app** — Settings → Output → *Type it out*.
 - **Verify your install** — `FlowType.exe --selftest` writes a full pipeline
   report to `%APPDATA%\FlowType\selftest.txt`.
+- **Something went wrong once** — `%APPDATA%\FlowTypettempts.log` has one
+  line per dictation: timings, audio measurements, outcome. It never contains
+  any of your words, so it is safe to attach to a bug report. Turn it off in
+  Settings → Privacy.
 
 ## Data
 
 Everything lives in `%APPDATA%\FlowType`: `settings.json`, `notes.json`,
-`dictionary.json`, `stats.json`, `models\ggml-*.bin`. Recordings are temporary
-WAVs deleted immediately after transcription.
+`dictionary.json`, `stats.json`, `models\ggml-*.bin`, and `attempts.log`
+(measurements only — never any transcribed text). Recordings are temporary WAVs
+deleted immediately after transcription.
 
 ## Project layout
 

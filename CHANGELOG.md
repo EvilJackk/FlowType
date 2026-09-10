@@ -4,44 +4,170 @@ All notable changes to FlowType. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/).
 
+## [1.4.0] — 2026-09-09
+
+Theme of the release: stop the small daily failures — a name spelled wrong, a
+paste that lost the race, room noise typed as words, a transcript that never
+arrived.
+
+### Fixed
+- **Esc now cancels while FlowType is transcribing.** It only ever worked while
+  the microphone was still open; the moment processing started, the key did
+  nothing. Everything downstream of it — the cancellation the app already had —
+  was unreachable code.
+- **A stuck transcription can no longer wedge the app.** Decoding now has a
+  generous time budget (four times the length of what you said, at least three
+  minutes); past that the attempt is abandoned and FlowType goes back to idle
+  instead of sitting in "processing" with a dead hotkey until restarted.
+- **A formatting error no longer throws your words away.** If anything in the
+  formatting chain fails — including a rule you wrote yourself — FlowType now
+  inserts what the model heard rather than showing an error. Dictionary rules
+  also have a time limit, so no entry can hang a dictation.
+- **The microphone stopping mid-sentence keeps what it captured.** Unplugging a
+  USB or Bluetooth mic during dictation used to delete the recording; the
+  captured audio is now transcribed, with a note that the mic disconnected.
+- **Fixed a hang** when the microphone test in Settings was opened in the
+  moment a dictation was finishing: the dictation never completed.
+- **Bracketed text you actually dictated survives.** "See note [1] and [2]"
+  came back as "See note and", and "[sic]" disappeared from quotations —
+  FlowType was stripping *any* bracketed text rather than only Whisper's own
+  markers.
+- **Dictionary rules no longer feed each other.** With "react → React" and
+  "React → React.js", "i use react daily" became "i use React.js daily", and
+  adding one entry could silently change what another produced. Every rule now
+  matches what you actually said; where two overlap, the longer one wins.
+- **A rule can now replace something with a space** — "-" → " " to undo
+  hyphenation is the obvious one, and it was impossible before.
+- Filler removal is no longer applied to languages where those are real words
+  ("um" is an article in Portuguese). It follows what the model actually
+  decoded rather than the language setting.
+
+### Added
+- **Fix near-misses of your dictionary words automatically** (Settings →
+  Formatting, on by default). Dictionary entries now correct themselves: FlowType
+  compares every one- to three-word run against your terms by spelling *and* by
+  sound, so a single "Arma Reforger" entry catches "Armour Forger", "armor
+  forger" and "Arma Reforge" without you writing a rule for each. Capitalisation
+  and punctuation around the phrase are preserved; email addresses and links are
+  never touched.
+- **Speech detection before the model.** Every take is measured in 20 ms windows
+  before it reaches Whisper. A muted microphone now says so ("No sound from the
+  microphone — check it's not muted"), and room tone is reported as "Didn't hear
+  any speech" instead of being handed to a model that invents a sentence for it.
+- **Quiet speech gets more help.** When a take's loudness swings the way speech
+  does, FlowType lifts it up to +30 dB instead of +24. Steady hiss and fan noise
+  keep the lower ceiling, so a noisy room is never amplified into a wall of sound
+  the model tries to read.
+- **Long silences at the end of a take are trimmed** back to a third of a second
+  before transcription — mostly a hands-free-session fix, where several seconds
+  of quiet used to be fed to the model.
+- More filler words removed: `hmm`, `mmm`, `ehm`, `ahm`, `er`, `ah`, `eh` join
+  `um`/`uh`/`erm`. Units survive ("5 mm" stays), hyphenated words survive
+  ("Ah-ha" stays), and an utterance that is *only* a filler is typed as spoken
+  rather than swallowed. The extra words are only removed when you are dictating
+  in English.
+
+- **A space after a finished sentence** (Settings → Output, on by default), so
+  dictating three sentences as three separate takes no longer gives you
+  "One.Two.Three." Skipped automatically after links, addresses and anything
+  that looks like code.
+- **Dictated code and aligned text keep their spacing.** "let x  =  1" and
+  "foo :: bar" used to be tidied into "let x = 1" and "foo:: bar".
+- **The dictionary now tells the model both halves.** A rule "armor forger →
+  Arma Reforger" told the recogniser the correct spelling but never the
+  mis-hearing it is about to produce; both now go into the prompt, labelled.
+- **A diagnostic log** at `%APPDATA%\FlowType\attempts.log` — one line per
+  dictation with timings, audio measurements and the outcome. **No transcript
+  text ever**, so it is safe to attach to a bug report. Off with Settings →
+  Privacy if you would rather not have it.
+
+### Changed
+- **Large · Maximum is now the recommended model on a machine with a dedicated
+  GPU**, replacing Turbo · Full. FlowType's own benchmark has said for a release
+  that Large makes about a third of Turbo's errors on mumbled speech; the
+  recommendation now matches the measurement. Turbo remains one click away for
+  anyone who prefers the speed.
+- Fast decoding is genuinely fast now: it was still generating five candidate
+  readings per attempt, which is most of the cost of the accurate mode.
+- **Pasting waits for the app to actually take the text.** FlowType used to set
+  the clipboard, press Ctrl+V, wait half a second and put your clipboard back —
+  a race that a busy app or a remote desktop can win, pasting your *old*
+  clipboard instead of what you said. It now hands the target a promise and puts
+  your clipboard back only once the target has genuinely read it (and never if
+  you copied something else in the meantime). Pasting is also about 120 ms
+  faster, since there is no longer anything to wait for before the keystroke.
+- Dictionary rules no longer rewrite text inside an email address, link or path.
+- The recognition prompt is now labelled ("Preferred spellings: …") and capped so
+  it always fits Whisper's window — a long dictionary used to silently push the
+  spelling convention out of it.
+- FlowType now says "CPU" when it is running on the CPU. On a machine whose
+  graphics driver cannot provide Vulkan, the engine quietly fell back to CPU
+  while the app still reported "GPU (Vulkan)".
+- **The Visual C++ runtime now ships with FlowType.** The speech engine needs
+  it, FlowType has no installer, and on a machine without it the engine simply
+  failed to load. Packaging refuses to produce a release without it.
+
+### Diagnostics
+- `FlowType.exe --pastetest` — exercises the whole clipboard transaction against
+  a real clipboard read, without sending keystrokes anywhere.
+- `FlowType.exe --conditioncheck <folder>` — runs the audio conditioner over a
+  folder of recordings and reports what it decided for each (verdict, gain,
+  trimmed tail) in seconds, without transcribing.
+- `--bench` now reports how many clips the pre-model speech check rejected.
+
 ## [1.3.0] — 2026-08-22
 
-### Changed — recognition
-- **Beam-search decoding** (5 hypotheses, temperature fallback ladder) replaces
-  greedy decoding. Settings → AI model → *Accurate decoding*, on by default.
-- **Audio conditioning** before the model: 80 Hz high-pass, gain lift for
-  quiet takes (capped at +24 dB), lead-in/tail padding. Sub-second utterances
-  were silently dropped before (whisper.cpp refuses anything under 1 s); they
-  are now padded and transcribed. Near-silent takes are rejected instead of
-  being hallucinated into "Thank you."
-- **Capture tail**: the mic stays open 280 ms after the hotkey is released, so
-  a word released on its last syllable is no longer clipped.
+Theme of the release: hear unclear speech better, stay out of the way, go
+monochrome.
+
+### Added
+- **Accurate decoding** (Settings → AI model, on by default): beam search with
+  five candidates and the reference temperature-fallback ladder instead of
+  taking the first guess. In testing on heavily degraded speech it roughly
+  halves the word errors of Small and Large.
+- **Large · Maximum** model (large-v3, 1.1 GB) in the catalog — the most
+  accurate on mumbled speech, about twice Turbo's wait on a strong GPU.
+- **GPU-aware recommendation**: machines with a dedicated GPU are steered to
+  *Turbo · Full* automatically; CPU-only machines keep the Small/Base pick.
 - **Hallucination guard**: on audio it cannot make out, Whisper sometimes
   echoes its own prompt ("The following is American English, and the
-  following is…") or loops a phrase. Both are now detected and dropped before
-  anything is typed; genuine speech is untouched (covered by selftest vectors).
+  following is…") or loops a phrase; both are now dropped before anything is
+  typed. Genuine speech is untouched (covered by self-test vectors).
 - **Warm-up after model load**: a short embedded clip runs through the model
   as soon as it loads, so the first real dictation no longer pays the 1–2 s
-  GPU kernel/buffer setup.
-- Dictionary rewrite targets (e.g. "Arma Reforger") now also bias recognition,
-  not only vocabulary-only entries.
-- **Model catalog**: *Turbo · Full* is now recommended automatically on
-  machines with a dedicated GPU; *Large · Maximum* (large-v3, 1.1 GB) added.
-- Flash attention enabled on the GPU path; whisper thread count follows
-  physical cores on the CPU path (was capped at 4).
-- Whisper.net 1.8.1 → 1.9.1 (newer whisper.cpp / ggml Vulkan kernels).
-- New hidden diagnostic: `FlowType.exe --bench <folder>` measures word error
-  rate and latency per model and decoding mode; `--selftest` now reports
-  which GPU whisper picked and checks the audio conditioner.
+  GPU setup cost.
+- Diagnostics: `FlowType.exe --bench <folder>` (word error rate and latency per
+  model, decoding mode and clip condition), `--snapshot <folder>` (renders
+  every window, page and flow-bar state to PNG off-screen), `--open
+  [--settings]` (launch straight into the main window). `--selftest` now
+  reports which GPU Whisper picked and checks the audio conditioner and the
+  hallucination guard.
 
-### Changed — look
+### Changed
+- **Audio conditioning** before recognition: 80 Hz high-pass, gain lift for
+  quiet takes (capped at +24 dB), lead-in and tail padding, and a silence gate
+  so a near-silent take says "didn't catch anything" instead of producing a
+  hallucinated "Thank you."
+- **Capture tail**: the microphone stays open 280 ms after the hotkey is
+  released, so a word released on its last syllable is no longer clipped.
+- Dictionary rewrite targets (e.g. "Arma Reforger") now also bias
+  recognition, not only vocabulary-only entries.
+- Flash attention on the GPU path; thread count follows physical cores on the
+  CPU path (was capped at 4).
+- Whisper.net 1.8.1 → 1.9.1 (newer whisper.cpp / ggml Vulkan kernels).
 - **Monochrome theme** everywhere: near-black surfaces, white accent, greys —
-  the purple is gone from the windows, flow bar, tray menu, chips, and the
-  app icon. Check boxes, radio buttons, combo boxes, progress bars and scroll
-  bars are now styled to match instead of using the stock Windows look.
-- **Slimmer flow bar**: roughly 40 % shorter in every state (≤ 28 px), narrower,
-  and moved down to 4 px above the taskbar so it stops covering message boxes
-  at the bottom of chat apps.
+  the purple is gone from the windows, flow bar, tray menu, chips, README
+  badges and the app icon. Check boxes, radio buttons, drop-downs, progress
+  bars and scroll bars are now styled to match instead of using the stock
+  Windows look; search and entry boxes show placeholder text.
+- **Slimmer flow bar**: no taller than a line of text in any state (≤ 28 px,
+  was up to 46), narrower, and moved down to 4 px above the taskbar so it
+  stops covering message boxes at the bottom of chat apps.
+
+### Fixed
+- Utterances under one second were silently dropped (whisper.cpp refuses
+  input shorter than 1 s); they are now padded and transcribed.
+- Room noise that decoded to a lone "." or "-" no longer counts as text.
 
 ## [1.2.0] — 2026-07-28
 

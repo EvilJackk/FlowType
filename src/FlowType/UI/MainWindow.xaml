@@ -1,4 +1,4 @@
-<Window x:Class="FlowType.UI.MainWindow"
+﻿<Window x:Class="FlowType.UI.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="FlowType"
@@ -266,7 +266,7 @@
                                       Content="Accurate decoding — hears unclear, quiet and mumbled speech better"
                                       Checked="Setting_Changed" Unchecked="Setting_Changed"/>
                             <TextBlock Style="{StaticResource Hint}" Margin="26,6,0,0"
-                                       Text="Keeps five candidate readings alive instead of committing to the first guess (beam search). Free on a GPU; roughly 1.5–2× slower on CPU. For the biggest jump on mumbled speech, pair it with Turbo · Full."/>
+                                       Text="Keeps five candidate readings alive instead of committing to the first guess (beam search). Free on a GPU; roughly 1.5–2× slower on CPU. For the biggest jump on mumbled speech, pair it with Large · Maximum."/>
                         </StackPanel>
                     </Border>
 
@@ -282,6 +282,11 @@
                                 <RadioButton x:Name="TypeRadio" Content="Type it out (for paste-blocking apps)"
                                              Margin="18,0,0,0" Checked="Setting_Changed"/>
                             </StackPanel>
+                            <CheckBox x:Name="TrailingSpaceCheck" Margin="0,10,0,0"
+                                      Content="Add a space after a finished sentence"
+                                      Checked="Setting_Changed" Unchecked="Setting_Changed"/>
+                            <TextBlock Style="{StaticResource Hint}" Margin="26,4,0,0"
+                                       Text="So two dictations in a row don't run together. Skipped after links, addresses and code."/>
                             <CheckBox x:Name="RestoreClipboardCheck" Margin="0,10,0,0"
                                       Content="Restore previous clipboard contents after pasting"
                                       Checked="Setting_Changed" Unchecked="Setting_Changed"/>
@@ -292,7 +297,7 @@
                         <StackPanel>
                             <TextBlock Style="{StaticResource SectionTitle}" Text="Formatting"/>
                             <CheckBox x:Name="FillersCheck" Margin="0,14,0,0"
-                                      Content="Remove filler words (um, uh, erm)"
+                                      Content="Remove filler words (um, uh, erm, hmm…)"
                                       Checked="Setting_Changed" Unchecked="Setting_Changed"/>
                             <CheckBox x:Name="ScratchCheck" Margin="0,10,0,0"
                                       Content="“Scratch that” — keep only what you say after a correction"
@@ -306,6 +311,11 @@
                             <CheckBox x:Name="SmartPunctCheck" Margin="0,10,0,0"
                                       Content="No trailing period after emails, URLs, and numbers"
                                       Checked="Setting_Changed" Unchecked="Setting_Changed"/>
+                            <CheckBox x:Name="FuzzyVocabCheck" Margin="0,10,0,0"
+                                      Content="Fix near-misses of your dictionary words automatically"
+                                      Checked="Setting_Changed" Unchecked="Setting_Changed"/>
+                            <TextBlock Style="{StaticResource Hint}" Margin="26,4,0,0"
+                                       Text="Matches by sound as well as spelling, so one entry covers every way a name gets misheard."/>
                         </StackPanel>
                     </Border>
 
@@ -317,6 +327,11 @@
                                       Checked="Setting_Changed" Unchecked="Setting_Changed"/>
                             <TextBlock Style="{StaticResource Hint}" Margin="24,6,0,0"
                                        Text="Off means nothing you dictate is ever written to disk — stats still count words. Audio is always temporary and deleted right after transcription."/>
+                            <CheckBox x:Name="DiagnosticLogCheck" Margin="0,12,0,0"
+                                      Content="Keep a diagnostic log of each dictation"
+                                      Checked="Setting_Changed" Unchecked="Setting_Changed"/>
+                            <TextBlock Style="{StaticResource Hint}" Margin="24,6,0,0"
+                                       Text="Timings and audio measurements only — never any of your words. Useful when something goes wrong; safe to send to anyone."/>
                             <CheckBox x:Name="PauseCheck" Margin="0,12,0,0"
                                       Content="Pause dictation (ignore the hotkey until unchecked)"
                                       Checked="Setting_Changed" Unchecked="Setting_Changed"/>

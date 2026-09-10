@@ -1,4 +1,4 @@
-using FlowType.Audio;
+﻿using FlowType.Audio;
 using FlowType.Core;
 using FlowType.Engine;
 using FlowType.Input;
@@ -149,7 +149,7 @@ public sealed class DictationSession
         {
             // Quick tap → hands-free until the next tap (or Esc).
             IsHandsFree = true;
-            if (_hotkeys != null) _hotkeys.RecordingActive = true;
+            if (_hotkeys != null) _hotkeys.SessionActive = true;
             Flash?.Invoke("Hands-free — tap again to finish", false);
             return;
         }
@@ -240,7 +240,7 @@ public sealed class DictationSession
             AudioRecorder.Instance.StartRecording();
             IsHandsFree = handsFree;
             RecordingStartTime = DateTime.Now;
-            if (_hotkeys != null) _hotkeys.RecordingActive = true;
+            if (_hotkeys != null) _hotkeys.SessionActive = true;
             SetState(SessionState.Recording, "");
             SoundCues.Start();
         }
@@ -254,7 +254,7 @@ public sealed class DictationSession
     private void CancelCapture(bool playCue)
     {
         AudioRecorder.Instance.Cancel();
-        if (_hotkeys != null) _hotkeys.RecordingActive = false;
+        if (_hotkeys != null) _hotkeys.SessionActive = false;
         IsHandsFree = false;
         if (playCue)
         {
@@ -272,9 +272,14 @@ public sealed class DictationSession
     private async Task StopAndTranscribeAsync()
     {
         IsHandsFree = false;
-        if (_hotkeys != null) _hotkeys.RecordingActive = false;
+        // SessionActive deliberately stays set until the finally below: Esc has
+        // to keep cancelling while the model is still working.
         SetState(SessionState.Processing, "");
         SoundCues.Stop();
+
+        // Written on every exit path, including the exception one — the paths
+        // that most need counting are the ones ad-hoc logging always misses.
+        using var attempt = new DictationAttempt();
 
         string? wavPath = null;
         var cts = new CancellationTokenSource();
@@ -284,49 +289,136 @@ public sealed class DictationSession
             // Esc during the tail still works: the recorder stops normally and
             // the already-cancelled token makes the transcription throw.
             await Task.Delay(ReleaseTail);
-            var take = await AudioRecorder.Instance.StopAsync();
+            // Bounded: the stop result comes from the device's own callback, and
+            // a device that never reports back would otherwise hold the session
+            // in Processing forever. Eight seconds is far past the 280 ms tail
+            // plus writer teardown on any machine that is actually working.
+            var take = await AudioRecorder.Instance.StopAsync()
+                .WaitAsync(TimeSpan.FromSeconds(8));
             if (take == null || take.Value.DurationSeconds < MinimumDurationSeconds)
             {
+                attempt.Outcome = AttemptOutcome.TooShort;
+                attempt.AudioSeconds = take?.DurationSeconds ?? 0;
                 AudioRecorder.TryDelete(take?.Path);
                 SetState(SessionState.Idle, "");
                 return;
             }
+            attempt.AudioSeconds = take.Value.DurationSeconds;
+            attempt.TakeOutcome = take.Value.Outcome;
             wavPath = take.Value.Path;
+            if (take.Value.Outcome == TakeOutcome.RecoverableDeviceError)
+            {
+                Flash?.Invoke("Microphone disconnected — transcribing what was captured", true);
+            }
+
+            // A wedged decode used to strand the session in Processing forever,
+            // and with no hotkey handling for that state the app was dead until
+            // it was restarted. The budget is generous — it exists to break a
+            // hang, not to cut a slow-but-working transcription short.
+            cts.CancelAfter(Transcriber.DecodeBudget(take.Value.DurationSeconds));
 
             var settings = SettingsStore.Instance.Settings;
-            var raw = await Transcriber.Instance.TranscribeAsync(
-                wavPath, settings.Language,
-                DictionaryStore.Instance.VocabularyWords, cts.Token);
+            var dictionary = DictionaryStore.Instance.VocabularySections;
+            var vocabulary = dictionary.Spellings;
+            var decodeWatch = System.Diagnostics.Stopwatch.StartNew();
+            var result = await Transcriber.Instance.TranscribeAsync(
+                wavPath, settings.Language, vocabulary, cts.Token,
+                spokenForms: dictionary.SpokenForms);
+            decodeWatch.Stop();
 
-            var text = TextFormatter.Apply(
-                raw, FormatterOptions.FromSettings(), DictionaryStore.Instance.Apply);
+            attempt.DecodeMs = decodeWatch.ElapsedMilliseconds;
+            attempt.Verdict = result.Verdict;
+            attempt.Metrics = result.Metrics;
+            attempt.Language = result.Language;
+            attempt.RawLength = result.Text.Length;
+            attempt.ModelId = Transcriber.Instance.CurrentModelId;
+            attempt.Runtime = Transcriber.Instance.RuntimeLabel;
+            attempt.Accurate = settings.AccurateDecoding;
 
+            // Formatting is an improvement on the transcript, never a
+            // precondition for it: a bad regex — including one in the user's own
+            // dictionary — must not turn words the model got right into a red
+            // error pill.
+            string text;
+            try
+            {
+                var model = ModelCatalog.ById(Transcriber.Instance.CurrentModelId);
+                text = TextFormatter.Apply(
+                    result.Text,
+                    FormatterOptions.FromSettings(
+                        vocabulary, result.Language, model?.EnglishOnly == true),
+                    DictionaryStore.Instance.Apply);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                text = result.Text.Trim();
+            }
+            cts.Token.ThrowIfCancellationRequested();
+
+            attempt.FinalLength = text.Length;
             if (string.IsNullOrWhiteSpace(text))
             {
-                Flash?.Invoke("Didn't catch anything", false);
+                attempt.Outcome = result.Verdict switch
+                {
+                    TakeVerdict.NoInput => AttemptOutcome.NoInput,
+                    TakeVerdict.NoSpeech => AttemptOutcome.NoSpeech,
+                    _ => AttemptOutcome.NothingToType,
+                };
+                // Saying *why* nothing arrived is the difference between "try
+                // again" and "your microphone is muted".
+                Flash?.Invoke(result.Verdict switch
+                {
+                    TakeVerdict.NoInput => "No sound from the microphone — check it's not muted",
+                    TakeVerdict.NoSpeech => "Didn't hear any speech",
+                    _ => "Didn't catch anything",
+                }, result.Verdict == TakeVerdict.NoInput);
                 SetState(SessionState.Idle, "");
                 return;
             }
 
+            // Remember what a clip long enough to identify actually decoded as,
+            // so the next two-second take does not have to guess.
+            if (!string.IsNullOrWhiteSpace(result.Language)
+                && take.Value.DurationSeconds >= Transcriber.LanguageDetectionSeconds
+                && result.Language != settings.LastDetectedLanguage)
+            {
+                settings.LastDetectedLanguage = result.Language!;
+                SettingsStore.Instance.Save();
+            }
+
             var appName = TextInjector.ForegroundAppName();
             var words = TextFormatter.CountWords(text);
+            attempt.AppName = appName;
+            attempt.WordCount = words;
+
+            // Last chance to honour Esc. Past this point the text is on its way
+            // into someone else's document and cancelling would be a lie.
+            cts.Token.ThrowIfCancellationRequested();
+
+            // Notes and stats keep the clean text; only what goes into someone
+            // else's document gets the sentence-boundary space.
+            var outgoing = settings.AppendTrailingSpace
+                ? TextFormatter.WithSentenceSpace(text)
+                : text;
 
             if (settings.AutoInsert)
             {
                 if (settings.InsertMethod == "type")
                 {
-                    await TextInjector.TypeAsync(text);
+                    await TextInjector.TypeAsync(outgoing);
                 }
                 else
                 {
-                    await TextInjector.PasteAsync(text, settings.RestoreClipboard);
+                    await TextInjector.PasteAsync(outgoing, settings.RestoreClipboard);
                 }
                 Flash?.Invoke($"✓ {words} {(words == 1 ? "word" : "words")}", false);
+                attempt.Outcome = AttemptOutcome.Inserted;
             }
             else
             {
-                TextInjector.CopyOnly(text);
+                TextInjector.CopyOnly(outgoing);
                 Flash?.Invoke($"Copied — {words} {(words == 1 ? "word" : "words")}", false);
+                attempt.Outcome = AttemptOutcome.Copied;
             }
 
             if (settings.SaveHistory)
@@ -346,16 +438,30 @@ public sealed class DictationSession
         }
         catch (OperationCanceledException)
         {
+            attempt.Outcome = AttemptOutcome.Canceled;
             Flash?.Invoke("Canceled", false);
             SetState(SessionState.Idle, "");
         }
+        catch (TimeoutException)
+        {
+            attempt.Outcome = AttemptOutcome.DeviceTimeout;
+            // The recorder never reported back. Say so rather than sitting in
+            // Processing; the file is left on disk for the age-based cleanup.
+            wavPath = null;
+            SetState(SessionState.Error, "The microphone stopped responding");
+            ResetAfterDelay();
+        }
         catch (Exception ex)
         {
+            attempt.Outcome = AttemptOutcome.Failed;
             SetState(SessionState.Error, ex.Message);
             ResetAfterDelay();
         }
         finally
         {
+            // Every exit path, including the exception one — otherwise Esc stays
+            // swallowed from the foreground app for the rest of the session.
+            if (_hotkeys != null) _hotkeys.SessionActive = false;
             AudioRecorder.TryDelete(wavPath);
             lock (_ctsGate)
             {

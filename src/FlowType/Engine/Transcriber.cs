@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
 using FlowType.Core;
@@ -8,6 +8,18 @@ using Whisper.net.LibraryLoader;
 using Whisper.net.Logger;
 
 namespace FlowType.Engine;
+
+/// <summary>
+/// One transcription attempt: the text, plus why it is empty when it is.
+/// <see cref="TakeVerdict.NoSpeech"/> and <see cref="TakeVerdict.NoInput"/>
+/// mean the audio was rejected before the model ran, which is a different
+/// message to the user than "the model heard nothing".
+/// </summary>
+public readonly record struct Transcription(
+    string Text, TakeVerdict Verdict, TakeMetrics Metrics, string? Language = null)
+{
+    public bool IsEmpty => string.IsNullOrWhiteSpace(Text);
+}
 
 /// <summary>
 /// Local speech-to-text via Whisper.net (whisper.cpp). Prefers the Vulkan GPU
@@ -22,6 +34,18 @@ public sealed class Transcriber
 
     /// <summary>Beam width for accurate decoding (OpenAI's reference default).</summary>
     public const int BeamSize = 5;
+
+    /// <summary>
+    /// How long a decode may take before it is treated as wedged. Four times
+    /// real time plus a minute of slack covers the worst measured case by a
+    /// wide margin (large-v3 beam search on CPU runs about 2x real time), so
+    /// this only ever fires on a hang — never on a slow but working machine.
+    /// Clamped to at least three minutes so a one-second utterance still gets
+    /// room for a cold GPU kernel compile, and to half an hour so a stuck
+    /// hands-free session cannot hold the app forever.
+    /// </summary>
+    public static TimeSpan DecodeBudget(double audioSeconds) =>
+        TimeSpan.FromSeconds(Math.Clamp(Math.Ceiling(audioSeconds) * 4 + 60, 180, 1800));
 
     private WhisperFactory? _factory;
     private readonly SemaphoreSlim _lock = new(1, 1);
@@ -176,9 +200,57 @@ public sealed class Transcriber
     {
         try
         {
+            var samples = WarmUpSamples();
+            if (samples.Length == 0) return;
+
+            using var processor = factory.CreateBuilder()
+                .WithThreads(ThreadCount)
+                .WithLanguage("en")
+                .WithGreedySamplingStrategy(g => g.WithBestOf(1))
+                .Build();
+            processor.Process(samples);
+        }
+        catch
+        {
+            // Warm-up is an optimisation, never a failure.
+        }
+    }
+
+    /// <summary>
+    /// Decode the embedded warm-up clip with language identification on and
+    /// report what the model said the language was. This is the only way to
+    /// know that Whisper.net actually populates <c>SegmentData.Language</c> on
+    /// this version — and the filler gate now depends on it, so --selftest
+    /// checks rather than assumes. Returns null if nothing was reported.
+    /// </summary>
+    internal async Task<string?> ProbeLanguageAsync()
+    {
+        var factory = _factory;
+        if (factory == null) return null;
+        var samples = WarmUpSamples();
+        if (samples.Length == 0) return null;
+
+        await using var processor = factory.CreateBuilder()
+            .WithThreads(ThreadCount)
+            .WithLanguageDetection()
+            .WithGreedySamplingStrategy(g => g.WithBestOf(1))
+            .Build();
+
+        await foreach (var segment in processor.ProcessAsync(samples))
+        {
+            if (!string.IsNullOrWhiteSpace(segment.Language)) return segment.Language;
+        }
+        return null;
+    }
+
+    /// <summary>The embedded 2 s clip of clean speech, as float samples.</summary>
+    private static float[] WarmUpSamples()
+    {
+        try
+        {
             using var stream = typeof(Transcriber).Assembly
                 .GetManifestResourceStream("FlowType.Resources.warmup.wav");
-            if (stream == null) return;
+            if (stream == null) return Array.Empty<float>();
             using var reader = new WaveFileReader(stream);
             var provider = reader.ToSampleProvider();
             var samples = new List<float>();
@@ -188,18 +260,11 @@ public sealed class Transcriber
             {
                 samples.AddRange(buffer.Take(read));
             }
-            if (samples.Count == 0) return;
-
-            using var processor = factory.CreateBuilder()
-                .WithThreads(ThreadCount)
-                .WithLanguage("en")
-                .WithGreedySamplingStrategy(g => g.WithBestOf(1))
-                .Build();
-            processor.Process(samples.ToArray());
+            return samples.ToArray();
         }
         catch
         {
-            // Warm-up is an optimisation, never a failure.
+            return Array.Empty<float>();
         }
     }
 
@@ -219,9 +284,10 @@ public sealed class Transcriber
     /// <paramref name="accurate"/> overrides the Settings decoding mode (used
     /// by the benchmark); null follows the user's setting.
     /// </summary>
-    public async Task<string> TranscribeAsync(
+    public async Task<Transcription> TranscribeAsync(
         string wavPath, string language, IReadOnlyList<string> vocabulary,
-        CancellationToken ct = default, bool? accurate = null)
+        CancellationToken ct = default, bool? accurate = null,
+        IReadOnlyList<string>? spokenForms = null)
     {
         await _lock.WaitAsync(ct);
         var factory = _factory;
@@ -236,8 +302,12 @@ public sealed class Transcriber
         {
             return await Task.Run(async () =>
             {
-                var samples = AudioConditioner.Prepare(ReadSamples(wavPath));
-                if (samples.Length == 0) return "";
+                var take = AudioConditioner.Prepare(ReadSamples(wavPath));
+                var samples = take.Samples;
+                if (samples.Length == 0)
+                {
+                    return new Transcription("", take.Verdict, take.Metrics, null);
+                }
 
                 var settings = SettingsStore.Instance.Settings;
                 var useBeam = accurate ?? settings.AccurateDecoding;
@@ -246,7 +316,10 @@ public sealed class Transcriber
                     .WithThreads(ThreadCount);
 
                 var model = ModelCatalog.ById(CurrentModelId);
-                var effectiveLanguage = model?.EnglishOnly == true ? "en" : language;
+                var effectiveLanguage = ResolveLanguage(
+                    language, model?.EnglishOnly == true,
+                    samples.Length / (double)AudioConditioner.SampleRate,
+                    settings.LastDetectedLanguage);
                 builder = effectiveLanguage == "auto"
                     ? builder.WithLanguageDetection()
                     : builder.WithLanguage(effectiveLanguage);
@@ -254,11 +327,8 @@ public sealed class Transcriber
                 // Initial prompt conditions the decoder: the English variant's
                 // sample text biases spelling, the user's dictionary words make
                 // uncommon names/terms far likelier to be recognized.
-                var promptParts = new List<string>();
                 var variantPrompt = EnglishVariant.RecognitionPrompt(settings.EnglishVariant);
-                if (variantPrompt != null) promptParts.Add(variantPrompt);
-                if (vocabulary.Count > 0) promptParts.Add(string.Join(", ", vocabulary.Take(24)));
-                var prompt = promptParts.Count > 0 ? string.Join(" ", promptParts) : null;
+                var prompt = BuildPrompt(variantPrompt, vocabulary, spokenForms);
                 if (prompt != null) builder = builder.WithPrompt(prompt);
 
                 // Decoding. Temperature fallback (the reference implementation's
@@ -271,7 +341,11 @@ public sealed class Transcriber
                     .WithTemperatureInc(0.2f)
                     .WithEntropyThreshold(2.4f)
                     .WithLogProbThreshold(-1.0f)
-                    .WithNoSpeechThreshold(0.6f);
+                    .WithNoSpeechThreshold(0.6f)
+                    // Don't let one window's text condition the next. Dictation
+                    // is one short utterance, and carrying context forward is
+                    // what turns a single misfire into a repeating loop.
+                    .WithNoContext();
 
                 // Beam search keeps five hypotheses alive per step instead of
                 // committing to the single likeliest token. Greedy decoding is
@@ -281,18 +355,35 @@ public sealed class Transcriber
                 // short utterances dictation produces.
                 builder = useBeam
                     ? builder.WithBeamSearchSamplingStrategy(b => b.WithBeamSize(BeamSize))
-                    : builder.WithGreedySamplingStrategy(g => g.WithBestOf(BeamSize));
+                    // best_of 5 samples five candidates per temperature step,
+                    // which is most of beam search's cost on the path whose
+                    // whole purpose is speed. The candidates belong to the
+                    // accurate profile; fast means fast.
+                    : builder.WithGreedySamplingStrategy(g => g.WithBestOf(1));
 
                 await using var processor = builder.Build();
                 var sb = new StringBuilder();
+                string? detected = null;
                 await foreach (var segment in processor.ProcessAsync(samples, ct))
                 {
+                    detected ??= segment.Language;
                     sb.Append(segment.Text);
                 }
+                // What the model actually decoded, not what was asked for. The
+                // formatter needs this: its filler lists are language-specific.
+                var decoded = string.IsNullOrWhiteSpace(detected)
+                    ? (effectiveLanguage == "auto" ? null : effectiveLanguage)
+                    : detected;
                 // Unintelligible audio makes the model echo the prompt or loop
                 // a phrase; both are caught here before anything is typed.
-                return HallucinationFilter.Apply(
-                    CleanNonSpeechMarkers(sb.ToString()), variantPrompt, vocabulary);
+                // The echo guard has to know about every word that went into
+                // the prompt, or it under-fires on the half it cannot see.
+                var promptTerms = spokenForms is { Count: > 0 }
+                    ? vocabulary.Concat(spokenForms).ToList()
+                    : vocabulary;
+                var text = HallucinationFilter.Apply(
+                    CleanNonSpeechMarkers(sb.ToString()), variantPrompt, promptTerms);
+                return new Transcription(text, take.Verdict, take.Metrics, decoded);
             }, ct);
         }
         finally
@@ -303,11 +394,23 @@ public sealed class Transcriber
         }
     }
 
+    /// <summary>
+    /// Which backend is *actually* doing the work.
+    ///
+    /// ggml loads its Vulkan backend dynamically, so on a machine with a
+    /// missing or broken Vulkan loader the backend quietly fails to register,
+    /// the model still loads on CPU, and nothing throws — the GPU retry below
+    /// never fires. <c>RuntimeOptions.LoadedLibrary</c> still says "Vulkan" in
+    /// that case, which is how a user ends up being told they are on the GPU
+    /// while waiting five times as long. whisper.cpp announces every device it
+    /// registers in its own log, so that is the honest source.
+    /// </summary>
     private string DescribeRuntime()
     {
+        var requested = "CPU";
         try
         {
-            return RuntimeOptions.LoadedLibrary switch
+            requested = RuntimeOptions.LoadedLibrary switch
             {
                 RuntimeLibrary.Vulkan => "GPU (Vulkan)",
                 RuntimeLibrary.Cuda => "GPU (CUDA)",
@@ -316,23 +419,176 @@ public sealed class Transcriber
         }
         catch
         {
-            return _gpuBroken || !SettingsStore.Instance.Settings.UseGpu ? "CPU" : "GPU/CPU";
+            requested = _gpuBroken || !SettingsStore.Instance.Settings.UseGpu ? "CPU" : "GPU/CPU";
         }
+
+        if (!requested.StartsWith("GPU")) return requested;
+        return GpuDeviceRegistered() ? requested : "CPU (no GPU device found)";
     }
+
+    /// <summary>True when whisper.cpp's log shows it registered a GPU backend.</summary>
+    private bool GpuDeviceRegistered()
+    {
+        foreach (var line in NativeLog)
+        {
+            if (line.Contains("backend_init_gpu", StringComparison.OrdinalIgnoreCase)
+                || line.Contains("found GPU device", StringComparison.OrdinalIgnoreCase)
+                || line.Contains("ggml_vulkan: 0 =", StringComparison.OrdinalIgnoreCase)
+                || line.Contains("using Vulkan", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Which language to ask the decoder for.
+    ///
+    /// whisper's language identification reads the first 30-second window, so
+    /// on a two-second push-to-talk clip it is guessing from almost nothing —
+    /// exactly the regime where it gets it wrong and the wrong filler list then
+    /// deletes real words. Short "auto" clips therefore inherit the last
+    /// language a long clip actually decoded, which for an English-only user is
+    /// simply always English.
+    /// </summary>
+    internal static string ResolveLanguage(string setting, bool englishOnlyModel,
+        double audioSeconds, string? lastDetected)
+    {
+        if (englishOnlyModel) return "en";
+        if (setting != "auto") return setting;
+        if (audioSeconds >= LanguageDetectionSeconds) return "auto";
+        return string.IsNullOrWhiteSpace(lastDetected) ? "en" : lastDetected!;
+    }
+
+    /// <summary>whisper's LID window: below this, detection is a coin toss.</summary>
+    internal const double LanguageDetectionSeconds = 10.0;
+
+    /// <summary>
+    /// whisper.cpp keeps only the last <c>n_text_ctx / 2</c> tokens of the
+    /// initial prompt — roughly 220 tokens. Overrunning that silently drops the
+    /// *front* of the prompt, which is where the spelling convention lives, so
+    /// the prompt is capped well inside the limit.
+    /// </summary>
+    internal const int MaxPromptChars = 900;
+
+    /// <summary>
+    /// Compose the decoder's initial prompt. Naming the two roles explicitly
+    /// conditions the model better than a bare comma list, because the prompt is
+    /// continued as text: a labelled list reads as a glossary rather than as the
+    /// start of a sentence the model should keep writing.
+    ///
+    /// Order is load-bearing. whisper.cpp keeps the *last* n_text_ctx/2 tokens
+    /// of an over-long prompt, so the section that must survive goes last — the
+    /// spellings, which are what the user actually wants written. Spoken forms
+    /// are the hint about how the model mishears them; useful, but expendable.
+    /// </summary>
+    internal static string? BuildPrompt(string? variantPrompt,
+        IReadOnlyList<string> spellings, IReadOnlyList<string>? spokenForms = null)
+    {
+        var budget = MaxPromptChars;
+        var variant = string.IsNullOrWhiteSpace(variantPrompt) ? null : variantPrompt!.Trim();
+        if (variant != null) budget -= variant.Length + 1;
+
+        // Spellings are budgeted first even though they are rendered last.
+        var spellingSection = Section("Preferred spellings", spellings, ref budget);
+        var spokenSection = Section("Possible spoken forms", spokenForms, ref budget);
+
+        var parts = new List<string>();
+        if (variant != null) parts.Add(variant);
+        if (spokenSection != null) parts.Add(spokenSection);
+        if (spellingSection != null) parts.Add(spellingSection);
+
+        if (parts.Count == 0) return null;
+        var prompt = string.Join(" ", parts);
+        // Should never trigger given the budgeting above; if it ever does, keep
+        // the tail, because that is the half whisper.cpp would keep too.
+        return prompt.Length <= MaxPromptChars ? prompt : prompt[^MaxPromptChars..];
+    }
+
+    private static string? Section(string label, IReadOnlyList<string>? terms, ref int budget)
+    {
+        if (terms is not { Count: > 0 }) return null;
+        var overhead = label.Length + 3;      // "Label: " and the closing period
+        if (budget <= overhead) return null;
+
+        var remaining = budget - overhead;
+        var kept = new List<string>();
+        foreach (var term in terms)
+        {
+            var trimmed = SanitizeTerm(term);
+            if (trimmed.Length == 0) continue;
+            var cost = trimmed.Length + (kept.Count > 0 ? 2 : 0);
+            if (cost > remaining) break;
+            remaining -= cost;
+            kept.Add(trimmed);
+        }
+        if (kept.Count == 0) return null;
+
+        var section = $"{label}: {string.Join(", ", kept)}.";
+        budget -= section.Length + 1;
+        return section;
+    }
+
+    /// <summary>
+    /// A dictionary entry can be pasted in and carry control characters or a
+    /// non-breaking space; either goes straight into the decoder's prompt and
+    /// wastes budget or confuses tokenisation.
+    /// </summary>
+    internal static string SanitizeTerm(string term)
+    {
+        var sb = new StringBuilder(term.Length);
+        var lastWasSpace = false;
+        foreach (var c in term)
+        {
+            if (char.IsControl(c) || char.IsWhiteSpace(c))
+            {
+                if (sb.Length > 0 && !lastWasSpace) { sb.Append(' '); lastWasSpace = true; }
+                continue;
+            }
+            sb.Append(c);
+            lastWasSpace = false;
+        }
+        return sb.ToString().Trim();
+    }
+
+    /// <summary>whisper.cpp's own non-speech annotations, and nothing else.</summary>
+    private const string MarkerWords = "blank_audio|sound|music|noise|inaudible|applause|laughter|silence";
+
+    private static readonly Regex MarkerPattern =
+        new($@"\[(?:{MarkerWords})\]", RegexOptions.IgnoreCase | RegexOptions.Compiled);
 
     /// <summary>
     /// Strip whisper.cpp's non-speech annotations ([BLANK_AUDIO], [MUSIC], ♪,
     /// a lone "(wind blowing)") so silence never types garbage.
+    ///
+    /// Deliberately narrow. Stripping *any* bracketed run — which is what this
+    /// used to do — quietly destroys ordinary dictation: "See note [1] and [2]"
+    /// became "See note and", "Compare a[0] to a[1]" became "Compare a to a",
+    /// and "[sic]" vanished from quotations.
     /// </summary>
     internal static string CleanNonSpeechMarkers(string text)
     {
-        var cleaned = Regex.Replace(text, @"\[[^\]]*\]", "");
-        cleaned = cleaned.Replace("♪", "").Trim();
-        if (Regex.IsMatch(cleaned, @"^\([^)]*\)$")) return "";
-        return Regex.Replace(cleaned, @"\s{2,}", " ").Trim();
+        var trimmed = text.Trim();
+
+        // A take that is nothing but a marker is nothing at all.
+        var whole = trimmed.ToLowerInvariant();
+        if (whole.Length == 0) return "";
+        if (MarkerPattern.IsMatch(whole) && MarkerPattern.Replace(whole, "").Trim().Length == 0)
+        {
+            return "";
+        }
+        if (Regex.IsMatch(trimmed, @"^\([^)]*\)$")) return "";
+
+        var cleaned = MarkerPattern.Replace(trimmed, "");
+        cleaned = cleaned.Replace("♪", "");
+        // Spaces and tabs only: \s would swallow the blank line between two
+        // paragraphs that "new paragraph" was asked to create.
+        return Regex.Replace(cleaned, @"[ 	]{2,}", " ").Trim();
     }
 
-    private static float[] ReadSamples(string wavPath)
+    /// <summary>Read a 16 kHz mono WAV to floats (also used by --conditioncheck).</summary>
+    internal static float[] ReadSamples(string wavPath)
     {
         using var reader = new WaveFileReader(wavPath);
         var provider = reader.ToSampleProvider();

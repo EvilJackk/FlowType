@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
@@ -32,10 +32,10 @@
        a classic heuristic trigger for AV engines; complete, honest identity
        information is the first step to being trusted. -->
   <PropertyGroup>
-    <Version>1.3.0</Version>
-    <AssemblyVersion>1.3.0.0</AssemblyVersion>
-    <FileVersion>1.3.0.0</FileVersion>
-    <InformationalVersion>1.3.0</InformationalVersion>
+    <Version>1.4.0</Version>
+    <AssemblyVersion>1.4.0.0</AssemblyVersion>
+    <FileVersion>1.4.0.0</FileVersion>
+    <InformationalVersion>1.4.0</InformationalVersion>
     <Product>FlowType</Product>
     <AssemblyTitle>FlowType — local voice typing</AssemblyTitle>
     <Description>Offline AI voice dictation for Windows. Speech is transcribed locally with OpenAI Whisper (whisper.cpp); no audio or text leaves the device.</Description>

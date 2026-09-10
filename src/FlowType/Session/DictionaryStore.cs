@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using FlowType.Core;
@@ -20,11 +20,21 @@ public class DictionaryEntry
     public bool Enabled { get; set; } = true;
     public bool MatchWholeWord { get; set; } = true;
 
-    public bool IsVocabularyOnly => string.IsNullOrWhiteSpace(Replacement);
+    /// <summary>
+    /// Empty means "just a word to recognise". Deliberately not
+    /// IsNullOrWhiteSpace: a replacement of a single space is the most useful
+    /// rule a dictation user writes ("-" → " " to undo hyphenation), and
+    /// treating it as vocabulary made it impossible to express *and* pushed the
+    /// hyphen into the decoder's prompt.
+    /// </summary>
+    public bool IsVocabularyOnly => Replacement.Length == 0;
 }
 
 public sealed class DictionaryStore
 {
+    /// <summary>Ceiling on one rule's match time (see <see cref="MatchPhrase"/>).</summary>
+    private static readonly TimeSpan RuleTimeout = TimeSpan.FromMilliseconds(250);
+
     public static DictionaryStore Instance { get; } = new();
 
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
@@ -44,40 +54,81 @@ public sealed class DictionaryStore
     }
 
     /// <summary>
-    /// Words to bias recognition toward (whisper initial prompt). Vocabulary
-    /// entries first, then the *targets* of short rewrite rules: a rule like
-    /// "armor forger → Arma Reforger" tells us the user keeps getting that
-    /// name mangled, and the cheapest fix is for the model to hear it right in
-    /// the first place. Long snippets (addresses, boilerplate) are left out so
+    /// The two halves of what the dictionary tells the recogniser.
+    ///
+    /// <paramref name="Spellings"/> is how a term should come out; it biases
+    /// the decoder and is what the fuzzy matcher corrects toward.
+    /// <paramref name="SpokenForms"/> is how the model keeps getting it wrong —
+    /// the *from* side of a rewrite rule — which is useful to the decoder as a
+    /// hint and would be actively harmful to the fuzzy matcher, since matching
+    /// toward it would rewrite correct text into the mis-hearing.
+    /// </summary>
+    public readonly record struct VocabularyLists(
+        IReadOnlyList<string> Spellings, IReadOnlyList<string> SpokenForms);
+
+    /// <summary>
+    /// Vocabulary entries and the *targets* of short rewrite rules become
+    /// spellings: a rule "armor forger → Arma Reforger" says the user keeps
+    /// getting that name mangled, and the cheapest fix is for the model to hear
+    /// it right in the first place. The rule's own phrase becomes a spoken
+    /// form. Long snippets (addresses, boilerplate) are left out of both so
     /// they don't crowd the prompt.
     /// </summary>
-    public IReadOnlyList<string> VocabularyWords
+    public VocabularyLists VocabularySections
     {
         get
         {
-            lock (_gate)
-            {
-                var words = new List<string>();
-                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                void Add(string text)
-                {
-                    var trimmed = text.Trim();
-                    if (trimmed.Length > 0 && seen.Add(trimmed)) words.Add(trimmed);
-                }
-                foreach (var e in _entries.Where(e => e.Enabled && e.IsVocabularyOnly)) Add(e.Phrase);
-                foreach (var e in _entries.Where(e => e.Enabled && !e.IsVocabularyOnly))
-                {
-                    var target = e.Replacement.Trim();
-                    var isShortName = target.Length <= 40
-                        && target.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length <= 4
-                        && target.Any(char.IsLetter)
-                        && !target.Contains('@') && !target.Contains("://");
-                    if (isShortName) Add(target);
-                }
-                return words;
-            }
+            lock (_gate) return SectionsFor(_entries);
         }
     }
+
+    /// <summary>The split on an explicit set of entries (also used by --selftest).</summary>
+    internal static VocabularyLists SectionsFor(IReadOnlyList<DictionaryEntry> entries)
+    {
+        var spellings = new List<string>();
+        var spoken = new List<string>();
+        var seenSpelling = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var seenSpoken = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // Two-character terms bias the decoder toward false positives
+        // and cost prompt budget for almost no information.
+        const int MinTermLength = 3;
+
+        static bool IsShortName(string text) =>
+            text.Length is >= MinTermLength and <= 40
+            && text.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length <= 4
+            && text.Any(char.IsLetter)
+            && !text.Contains('@') && !text.Contains("://");
+
+        foreach (var e in entries.Where(e => e.Enabled && e.IsVocabularyOnly))
+        {
+            var phrase = Engine.Transcriber.SanitizeTerm(e.Phrase);
+            if (IsShortName(phrase) && seenSpelling.Add(phrase)) spellings.Add(phrase);
+        }
+        foreach (var e in entries.Where(e => e.Enabled && !e.IsVocabularyOnly))
+        {
+            var target = Engine.Transcriber.SanitizeTerm(e.Replacement);
+            var phrase = Engine.Transcriber.SanitizeTerm(e.Phrase);
+            var targetIsTerm = IsShortName(target);
+            if (targetIsTerm && seenSpelling.Add(target)) spellings.Add(target);
+
+            // "How it gets heard" is only worth telling the decoder when
+            // the thing being heard is a term we are biasing toward. A
+            // snippet trigger ("my email" → an address) is a phrase the
+            // user says on purpose, not a mis-hearing, and a casing-only
+            // rule teaches the decoder nothing at all.
+            if (targetIsTerm && IsShortName(phrase)
+                && !phrase.Equals(target, StringComparison.OrdinalIgnoreCase)
+                && seenSpoken.Add(phrase))
+            {
+                spoken.Add(phrase);
+            }
+        }
+        return new VocabularyLists(spellings, spoken);
+    }
+
+    /// <summary>Spellings only — the list the fuzzy matcher may correct toward.</summary>
+    public IReadOnlyList<string> VocabularyWords => VocabularySections.Spellings;
 
     public void Add(string phrase, string replacement, bool matchWholeWord = true)
     {
@@ -119,23 +170,71 @@ public sealed class DictionaryStore
     /// <summary>Apply every enabled rewrite rule. Case-insensitive, word-boundary aware.</summary>
     public string Apply(string text)
     {
-        if (string.IsNullOrEmpty(text)) return text;
-
         List<DictionaryEntry> snapshot;
         lock (_gate) snapshot = _entries.ToList();
-
-        var result = text;
-        foreach (var entry in snapshot.Where(e => e.Enabled && !e.IsVocabularyOnly))
-        {
-            var phrase = entry.Phrase.Trim();
-            if (phrase.Length == 0) continue;
-            result = ReplacePhrase(phrase, entry.Replacement, result, entry.MatchWholeWord);
-        }
-        return result;
+        return ApplyRules(text, snapshot);
     }
 
-    private static string ReplacePhrase(string phrase, string replacement, string text,
-        bool matchWholeWord)
+    private readonly record struct Candidate(int Start, int End, string Target, int Rule);
+
+    /// <summary>
+    /// Apply every enabled rewrite rule to the *original* text, once.
+    ///
+    /// This used to be a loop of full-text replacements, each running on the
+    /// previous rule's output, so rules silently fed each other: with
+    /// "react → React" and "React → React.js", "i use react daily" came out as
+    /// "i use React.js daily", and adding an unrelated entry could change what
+    /// an existing one produced. Every rule now matches against the transcript
+    /// as spoken; overlaps are resolved longest-first, then by the order the
+    /// rules appear, and the result is spliced together in one pass.
+    /// </summary>
+    internal static string ApplyRules(string text, IReadOnlyList<DictionaryEntry> entries)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+
+        var candidates = new List<Candidate>();
+        for (var i = 0; i < entries.Count; i++)
+        {
+            var entry = entries[i];
+            if (!entry.Enabled || entry.IsVocabularyOnly) continue;
+            var phrase = entry.Phrase.Trim();
+            if (phrase.Length == 0) continue;
+
+            foreach (var match in MatchPhrase(phrase, text, entry.MatchWholeWord))
+            {
+                if (IsInsideProtectedToken(text, match.Index, match.Index + match.Length)) continue;
+                candidates.Add(new Candidate(
+                    match.Index, match.Index + match.Length, entry.Replacement, i));
+            }
+        }
+        if (candidates.Count == 0) return text;
+
+        // List.Sort is unstable, so the rule index is an explicit tiebreak
+        // rather than something inherited from insertion order.
+        candidates.Sort((a, b) =>
+        {
+            var byStart = a.Start.CompareTo(b.Start);
+            if (byStart != 0) return byStart;
+            var byLength = (b.End - b.Start).CompareTo(a.End - a.Start);
+            return byLength != 0 ? byLength : a.Rule.CompareTo(b.Rule);
+        });
+
+        var sb = new System.Text.StringBuilder(text.Length);
+        var cursor = 0;
+        foreach (var c in candidates)
+        {
+            if (c.Start < cursor) continue;      // already covered by a longer match
+            sb.Append(text, cursor, c.Start - cursor);
+            // A splice, not a Regex substitution: "$" in a replacement is
+            // literal text and needs no escaping.
+            sb.Append(c.Target);
+            cursor = c.End;
+        }
+        sb.Append(text, cursor, text.Length - cursor);
+        return sb.ToString();
+    }
+
+    private static IEnumerable<Match> MatchPhrase(string phrase, string text, bool matchWholeWord)
     {
         // Spaces in the phrase match any whitespace run so multi-word snippets
         // survive spacing differences.
@@ -145,13 +244,35 @@ public sealed class DictionaryStore
 
         try
         {
-            return Regex.Replace(text, $"{lead}{escaped}{tail}",
-                replacement.Replace("$", "$$"), RegexOptions.IgnoreCase);
+            // A user-authored phrase becomes a regex, and the space -> \s+
+            // rewrite above is a catastrophic-backtracking shape. A dictionary
+            // entry must never be able to hang a dictation.
+            return Regex.Matches(text, $"{lead}{escaped}{tail}",
+                RegexOptions.IgnoreCase, RuleTimeout).ToList();
         }
-        catch (ArgumentException)
+        catch (Exception ex) when (ex is ArgumentException or RegexMatchTimeoutException)
         {
-            return text;
+            return Array.Empty<Match>();
         }
+    }
+
+    /// <summary>
+    /// An email address, URL or path is one opaque thing: rewriting a fragment
+    /// of it always breaks it. A rule "type → Type" must not turn
+    /// "roy@type.com" into "roy@Type.com".
+    /// </summary>
+    private static bool IsInsideProtectedToken(string text, int start, int end)
+    {
+        var tokenStart = start;
+        while (tokenStart > 0 && !char.IsWhiteSpace(text[tokenStart - 1])) tokenStart--;
+        var tokenEnd = end;
+        while (tokenEnd < text.Length && !char.IsWhiteSpace(text[tokenEnd])) tokenEnd++;
+
+        var token = text[tokenStart..tokenEnd];
+        if (token.Contains("://")) return true;
+        if (token.StartsWith("www.", StringComparison.OrdinalIgnoreCase)) return true;
+        var at = token.IndexOf('@');
+        return at > 0 && at + 1 < token.Length;
     }
 
     private void Save() => JsonFile.Write(AppPaths.DictionaryFile, _entries);

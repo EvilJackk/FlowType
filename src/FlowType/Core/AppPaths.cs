@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 
 namespace FlowType.Core;
 
@@ -18,6 +18,9 @@ public static class AppPaths
     public static string NotesFile { get; } = Path.Combine(DataDir, "notes.json");
     public static string DictionaryFile { get; } = Path.Combine(DataDir, "dictionary.json");
     public static string StatsFile { get; } = Path.Combine(DataDir, "stats.json");
+
+    /// <summary>One JSON line per dictation — measurements only, never text.</summary>
+    public static string AttemptLog { get; } = Path.Combine(DataDir, "attempts.log");
 
     public static void EnsureCreated()
     {

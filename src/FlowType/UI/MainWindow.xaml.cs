@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -212,16 +212,19 @@ public partial class MainWindow : Window
         GpuCheck.IsChecked = s.UseGpu;
         AccurateCheck.IsChecked = s.AccurateDecoding;
         SaveHistoryCheck.IsChecked = s.SaveHistory;
+        DiagnosticLogCheck.IsChecked = s.DiagnosticLog;
         PauseCheck.IsChecked = s.DictationPaused;
         AutoInsertCheck.IsChecked = s.AutoInsert;
         PasteRadio.IsChecked = s.InsertMethod != "type";
         TypeRadio.IsChecked = s.InsertMethod == "type";
         RestoreClipboardCheck.IsChecked = s.RestoreClipboard;
+        TrailingSpaceCheck.IsChecked = s.AppendTrailingSpace;
         FillersCheck.IsChecked = s.RemoveFillers;
         ScratchCheck.IsChecked = s.ScratchThat;
         LineCmdCheck.IsChecked = s.LineCommands;
         PunctCmdCheck.IsChecked = s.PunctuationCommands;
         SmartPunctCheck.IsChecked = s.SmartTrailingPunctuation;
+        FuzzyVocabCheck.IsChecked = s.FuzzyVocabulary;
         StartupCheck.IsChecked = StartupHelper.IsEnabled;
         ShowBarCheck.IsChecked = s.ShowBarWhenIdle;
     }
@@ -400,15 +403,18 @@ public partial class MainWindow : Window
         s.UseGpu = GpuCheck.IsChecked == true;
         s.AccurateDecoding = AccurateCheck.IsChecked == true;
         s.SaveHistory = SaveHistoryCheck.IsChecked == true;
+        s.DiagnosticLog = DiagnosticLogCheck.IsChecked == true;
         s.DictationPaused = PauseCheck.IsChecked == true;
         s.AutoInsert = AutoInsertCheck.IsChecked == true;
         s.InsertMethod = TypeRadio.IsChecked == true ? "type" : "paste";
         s.RestoreClipboard = RestoreClipboardCheck.IsChecked == true;
+        s.AppendTrailingSpace = TrailingSpaceCheck.IsChecked == true;
         s.RemoveFillers = FillersCheck.IsChecked == true;
         s.ScratchThat = ScratchCheck.IsChecked == true;
         s.LineCommands = LineCmdCheck.IsChecked == true;
         s.PunctuationCommands = PunctCmdCheck.IsChecked == true;
         s.SmartTrailingPunctuation = SmartPunctCheck.IsChecked == true;
+        s.FuzzyVocabulary = FuzzyVocabCheck.IsChecked == true;
         s.ShowBarWhenIdle = ShowBarCheck.IsChecked == true;
 
         SettingsStore.Instance.Save();

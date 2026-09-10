@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using FlowType.Core;
 
 namespace FlowType.Engine;
@@ -47,10 +47,10 @@ public static class ModelCatalog
             "Near-flagship accuracy in a compact file. Shines with GPU.",
             "574 MB", 500_000_000, 6, EnglishOnly: false),
         new WhisperModel("large-v3-turbo", "Turbo · Full",
-            "Hears unclear speech far better than Small, and still fast. The pick for any real GPU.",
+            "The fast pick for a GPU: far better than Small on unclear speech, and quickest of the big models. Makes about three times Large's errors on mumbling.",
             "1.6 GB", 1_400_000_000, 8, EnglishOnly: false),
         new WhisperModel("large-v3-q5_0", "Large · Maximum",
-            "The flagship. Best on mumbled speech in our tests (about a third of Turbo's errors) at roughly twice the wait. Wants a strong GPU.",
+            "The accuracy pick. Best on mumbled speech in our tests — about a third of Turbo's errors — for roughly twice the wait. Wants a strong GPU.",
             "1.1 GB", 950_000_000, 8, EnglishOnly: false),
     };
 
@@ -66,7 +66,12 @@ public static class ModelCatalog
     {
         if (SettingsStore.Instance.Settings.UseGpu && GpuInfo.HasDiscreteGpu)
         {
-            return ById("large-v3-turbo")!;
+            // Our own hard-set bench: on mumbled speech large-v3 makes about a
+            // third of Turbo's errors, at roughly twice the wait on a real GPU.
+            // Recommending Turbo here contradicted the catalog's own blurb and
+            // steered people away from the thing they came for.
+            var ram = (int)(GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (1024L * 1024 * 1024));
+            return ram >= 8 ? ById("large-v3-q5_0")! : ById("large-v3-turbo")!;
         }
         var ramGB = (int)(GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (1024L * 1024 * 1024));
         return ramGB >= 8 ? ById("small.en")! : ById("base.en")!;

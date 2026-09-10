@@ -16,6 +16,14 @@ public static class TextInjector
 {
     public static async Task PasteAsync(string text, bool restoreClipboard)
     {
+        // Preferred path: publish a clipboard promise and restore only once the
+        // target has actually read it (see ReliablePaste). Nothing to "settle"
+        // before the chord either, which takes ~120 ms out of every dictation.
+        if (await ReliablePaste.PasteAsync(text, restoreClipboard)) return;
+
+        // Fallback for the rare case the transaction cannot start (another app
+        // holding the clipboard open, a window-class failure): the old
+        // fixed-delay dance, which is racy but better than not pasting.
         var previous = OnUIThread(TryGetClipboardText);
         OnUIThread(() => TrySetClipboardText(text));
 

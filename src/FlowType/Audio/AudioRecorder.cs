@@ -1,8 +1,23 @@
-using System.IO;
+﻿using System.IO;
 using FlowType.Core;
 using NAudio.Wave;
 
 namespace FlowType.Audio;
+
+/// <summary>How a capture ended.</summary>
+public enum TakeOutcome
+{
+    /// <summary>Stopped cleanly.</summary>
+    Ok,
+
+    /// <summary>The device faulted, but the audio up to that point was written.</summary>
+    RecoverableDeviceError,
+
+    /// <summary>The device never reported it had stopped; the file may be short.</summary>
+    Unfinalized,
+}
+
+public readonly record struct RecordedTake(string Path, double DurationSeconds, TakeOutcome Outcome);
 
 /// <summary>
 /// Microphone capture at 16 kHz mono 16-bit (whisper.cpp's native format).
@@ -21,7 +36,7 @@ public sealed class AudioRecorder
     private WaveInEvent? _waveIn;
     private WaveFileWriter? _writer;
     private string? _currentFilePath;
-    private TaskCompletionSource<(string Path, double DurationSeconds)?>? _stopTcs;
+    private TaskCompletionSource<RecordedTake?>? _stopTcs;
     private bool _discardOnStop;
     private bool _monitorOnly;
     private bool _autoStopRaised;
@@ -66,15 +81,15 @@ public sealed class AudioRecorder
     }
 
     /// <summary>Stop and return the WAV path + duration (null if discarded).</summary>
-    public Task<(string Path, double DurationSeconds)?> StopAsync()
+    public Task<RecordedTake?> StopAsync()
     {
         lock (_gate)
         {
             if (!IsRecording || _waveIn == null)
             {
-                return Task.FromResult<(string, double)?>(null);
+                return Task.FromResult<RecordedTake?>(null);
             }
-            _stopTcs = new TaskCompletionSource<(string, double)?>(
+            _stopTcs = new TaskCompletionSource<RecordedTake?>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
             IsRecording = false;
             _waveIn.StopRecording();
@@ -99,7 +114,11 @@ public sealed class AudioRecorder
     {
         lock (_gate)
         {
-            if (IsRecording || IsMonitoring) return;
+            // _stopTcs != null means a take is still draining: IsRecording is
+            // already false but RecordingStopped has not fired yet. Opening the
+            // monitor in that window used to replace _waveIn and swallow the
+            // pending result, leaving the session in Processing forever.
+            if (IsRecording || IsMonitoring || _stopTcs != null) return;
             _waveIn = CreateWaveIn();
             _monitorOnly = true;
             _waveIn.DataAvailable += OnDataAvailable;
@@ -130,7 +149,26 @@ public sealed class AudioRecorder
         BufferMilliseconds = 50,
     };
 
+    /// <summary>Faults swallowed inside the capture callback; surfaced by --selftest.</summary>
+    public int CallbackFaults => _callbackFaults;
+    private int _callbackFaults;
+
     private void OnDataAvailable(object? sender, WaveInEventArgs e)
+    {
+        // An exception escaping the capture callback tears down the capture
+        // loop, and the take goes with it. A full disk or a throwing subscriber
+        // must cost one buffer, not the whole dictation.
+        try
+        {
+            WriteBuffer(e);
+        }
+        catch
+        {
+            Interlocked.Increment(ref _callbackFaults);
+        }
+    }
+
+    private void WriteBuffer(WaveInEventArgs e)
     {
         WaveFileWriter? writer;
         bool shouldAutoStop = false;
@@ -164,7 +202,7 @@ public sealed class AudioRecorder
         string? path;
         double duration;
         bool discard, monitor;
-        TaskCompletionSource<(string, double)?>? tcs;
+        TaskCompletionSource<RecordedTake?>? tcs;
 
         lock (_gate)
         {
@@ -190,7 +228,13 @@ public sealed class AudioRecorder
             IsMonitoring = false;
         }
 
-        if (monitor) return;
+        // Always answer a pending stop, even on the monitor path — dropping it
+        // here is what used to strand the session in Processing.
+        if (monitor)
+        {
+            tcs?.TrySetResult(null);
+            return;
+        }
 
         if (discard || path == null)
         {
@@ -201,12 +245,20 @@ public sealed class AudioRecorder
 
         if (e.Exception != null)
         {
+            // The writer was already disposed above, so whatever was captured
+            // before the device faulted is a valid WAV. Unplugging a USB mic at
+            // second 9 of a 10-second dictation used to delete all nine.
+            if (duration >= 0.3 && File.Exists(path))
+            {
+                tcs?.TrySetResult(new RecordedTake(path, duration, TakeOutcome.RecoverableDeviceError));
+                return;
+            }
             TryDelete(path);
             tcs?.TrySetException(e.Exception);
             return;
         }
 
-        tcs?.TrySetResult((path, duration));
+        tcs?.TrySetResult(new RecordedTake(path, duration, TakeOutcome.Ok));
     }
 
     // ----- Devices -----

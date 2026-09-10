@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 using System.Windows.Threading;
 using FlowType.Core;
 
@@ -117,8 +117,13 @@ public sealed class HotkeyManager : IDisposable
     /// <summary>Live view for the settings indicator.</summary>
     public bool IsHotkeyDown { get { lock (_stateGate) return _active; } }
 
-    /// <summary>Set by the session while capturing so Esc cancels and is swallowed.</summary>
-    public volatile bool RecordingActive;
+    /// <summary>
+    /// Set by the session for the whole dictation — capture *and* decode — so
+    /// Esc cancels and is swallowed. It used to be cleared the moment recording
+    /// stopped, which made Esc-during-transcription silently do nothing and left
+    /// the cancellation machinery downstream unreachable.
+    /// </summary>
+    public volatile bool SessionActive;
 
     /// <summary>Raw hook trace for the --keylog diagnostic; null in normal runs.</summary>
     public Action<string>? Trace;
@@ -307,7 +312,7 @@ public sealed class HotkeyManager : IDisposable
             return NativeMethods.CallNextHookEx(_hookHandle, nCode, wParam, lParam);
         }
 
-        if (vk == NativeMethods.VK_ESCAPE && isDown && RecordingActive)
+        if (vk == NativeMethods.VK_ESCAPE && isDown && SessionActive)
         {
             Post(CancelRequested);
             return new IntPtr(1);

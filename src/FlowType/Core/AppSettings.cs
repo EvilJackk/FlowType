@@ -1,4 +1,4 @@
-namespace FlowType.Core;
+﻿namespace FlowType.Core;
 
 /// <summary>User preferences, persisted as JSON at %APPDATA%\FlowType\settings.json.</summary>
 public class AppSettings
@@ -32,6 +32,13 @@ public class AppSettings
     /// </summary>
     public string EnglishVariant { get; set; } = "off";
 
+    /// <summary>
+    /// The last language a clip long enough to identify actually decoded as.
+    /// Short push-to-talk takes inherit it, because whisper needs a 30-second
+    /// window to identify a language and guesses badly on two seconds.
+    /// </summary>
+    public string LastDetectedLanguage { get; set; } = "en";
+
     // ----- AI model -----
 
     /// <summary>Model id from the catalog (e.g. "small.en"). Empty until onboarding.</summary>
@@ -63,10 +70,24 @@ public class AppSettings
 
     public bool RestoreClipboard { get; set; } = true;
 
+    /// <summary>
+    /// Put one space after an inserted sentence so back-to-back dictations do
+    /// not run together ("One.Two."). Suppressed automatically after addresses,
+    /// links and anything that looks like code.
+    /// </summary>
+    public bool AppendTrailingSpace { get; set; } = true;
+
     // ----- Formatting -----
 
     public bool RemoveFillers { get; set; } = true;
     public bool ScratchThat { get; set; } = true;
+
+    /// <summary>
+    /// Correct near-misses of dictionary words even when no exact rule matches
+    /// ("Armour Forger" → "Arma Reforger"). Compares sound as well as spelling,
+    /// so one dictionary entry covers every way the model mangles the name.
+    /// </summary>
+    public bool FuzzyVocabulary { get; set; } = true;
 
     /// <summary>"new line" / "new paragraph" spoken commands.</summary>
     public bool LineCommands { get; set; } = true;
@@ -92,6 +113,13 @@ public class AppSettings
 
     /// <summary>Hands-free safety cap; a forgotten mic stops itself.</summary>
     public int MaxRecordingMinutes { get; set; } = 5;
+
+    /// <summary>
+    /// Append one line per dictation to attempts.log: timings, audio
+    /// measurements, outcome. No transcript text ever, so it is safe to share.
+    /// On by default — its whole value is being on when the odd failure happens.
+    /// </summary>
+    public bool DiagnosticLog { get; set; } = true;
 
     public bool OnboardingComplete { get; set; } = false;
 
