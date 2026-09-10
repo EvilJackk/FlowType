@@ -136,6 +136,13 @@ public sealed class HotkeyManager : IDisposable
     /// <summary>Every real (non-FlowType) keydown the hook sees — feeds the live key monitor.</summary>
     public event Action<int>? KeyObserved;
 
+    /// <summary>
+    /// The same keydowns, with the character each produces where there is one,
+    /// for <see cref="Session.CorrectionWatcher"/>. Only ever consumed for a
+    /// few seconds after FlowType itself inserted text, and never recorded.
+    /// </summary>
+    public event Action<int, char>? KeyTyped;
+
     public HotkeyManager(Dispatcher dispatcher)
     {
         _dispatcher = dispatcher;
@@ -295,6 +302,13 @@ public sealed class HotkeyManager : IDisposable
             $"injected={((flags & NativeMethods.LLKHF_INJECTED) != 0 ? 1 : 0)} " +
             $"extra=0x{extraInfo.ToInt64():X}");
 
+        if (isDown && KeyTyped != null)
+        {
+            var typed = KeyTyped;
+            var ch = CharacterFor(vk);
+            Post(() => typed(vk, ch));
+        }
+
         if (isDown && KeyObserved != null)
         {
             var observed = KeyObserved;
@@ -358,6 +372,29 @@ public sealed class HotkeyManager : IDisposable
     }
 
     /// <summary>De-duplicating funnel for both detection paths.</summary>
+    /// <summary>
+    /// The character a key produces, for the letters, digits and few symbols a
+    /// dictionary term can contain. Deliberately not ToUnicodeEx: that mutates
+    /// dead-key state and must never be called from inside a hook. Anything
+    /// else reports no character and simply is not part of a correction.
+    /// </summary>
+    private static char CharacterFor(int vk)
+    {
+        var shift = NativeMethods.IsKeyDown(0x10);
+        var caps = (NativeMethods.GetKeyState(0x14) & 1) != 0;
+
+        if (vk is >= 0x41 and <= 0x5A)
+        {
+            return (char)(shift ^ caps ? vk : vk + 32);
+        }
+        if (vk is >= 0x30 and <= 0x39 && !shift) return (char)vk;
+        if (vk is >= 0x60 and <= 0x69) return (char)('0' + (vk - 0x60));
+        if (vk == 0x20) return ' ';
+        if (vk == 0xBD && !shift) return '-';
+        if (vk == 0xDE && !shift) return (char)39;   // apostrophe
+        return (char)0;
+    }
+
     private void SetActive(bool active)
     {
         bool changed;

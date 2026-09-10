@@ -2,6 +2,7 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using FlowType.Core;
+using FlowType.Engine;
 
 namespace FlowType.Session;
 
@@ -19,6 +20,9 @@ public class DictionaryEntry
     public string Replacement { get; set; } = "";
     public bool Enabled { get; set; } = true;
     public bool MatchWholeWord { get; set; } = true;
+
+    /// <summary>Added automatically from a correction the user typed, not by hand.</summary>
+    public bool LearnedFromCorrection { get; set; }
 
     /// <summary>
     /// Empty means "just a word to recognise". Deliberately not
@@ -102,13 +106,13 @@ public sealed class DictionaryStore
 
         foreach (var e in entries.Where(e => e.Enabled && e.IsVocabularyOnly))
         {
-            var phrase = Engine.Transcriber.SanitizeTerm(e.Phrase);
+            var phrase = Transcriber.SanitizeTerm(e.Phrase);
             if (IsShortName(phrase) && seenSpelling.Add(phrase)) spellings.Add(phrase);
         }
         foreach (var e in entries.Where(e => e.Enabled && !e.IsVocabularyOnly))
         {
-            var target = Engine.Transcriber.SanitizeTerm(e.Replacement);
-            var phrase = Engine.Transcriber.SanitizeTerm(e.Phrase);
+            var target = Transcriber.SanitizeTerm(e.Replacement);
+            var phrase = Transcriber.SanitizeTerm(e.Phrase);
             var targetIsTerm = IsShortName(target);
             if (targetIsTerm && seenSpelling.Add(target)) spellings.Add(target);
 
@@ -130,6 +134,41 @@ public sealed class DictionaryStore
     /// <summary>Spellings only — the list the fuzzy matcher may correct toward.</summary>
     public IReadOnlyList<string> VocabularyWords => VocabularySections.Spellings;
 
+    /// <summary>
+    /// Every rewrite rule as a (heard, write) pair for the fuzzy matcher.
+    ///
+    /// The rule the user wrote down is the closest thing FlowType has to a
+    /// sample of how the model actually mishears their term — much closer than
+    /// the correct spelling is. Matching near-misses of *it* as well is what
+    /// turns one rule into a family instead of a single point fix.
+    /// </summary>
+    public IReadOnlyList<VocabularyMatcher.Alias> Aliases
+    {
+        get
+        {
+            lock (_gate) return AliasesFor(_entries);
+        }
+    }
+
+    internal static IReadOnlyList<VocabularyMatcher.Alias> AliasesFor(
+        IReadOnlyList<DictionaryEntry> entries)
+    {
+        var list = new List<VocabularyMatcher.Alias>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var e in entries.Where(e => e.Enabled && !e.IsVocabularyOnly))
+        {
+            var heard = Transcriber.SanitizeTerm(e.Phrase);
+            var write = Transcriber.SanitizeTerm(e.Replacement);
+            // Only for real terms: a snippet trigger whose target is an address
+            // or a paragraph must stay an exact-match rule.
+            if (heard.Length < 4 || write.Length is < 3 or > 40) continue;
+            if (write.Contains('@') || write.Contains("://")) continue;
+            if (heard.Equals(write, StringComparison.OrdinalIgnoreCase)) continue;
+            if (seen.Add(heard)) list.Add(new VocabularyMatcher.Alias(heard, write));
+        }
+        return list;
+    }
+
     public void Add(string phrase, string replacement, bool matchWholeWord = true)
     {
         lock (_gate)
@@ -143,6 +182,33 @@ public sealed class DictionaryStore
             Save();
         }
         Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// Add a rule that came from the user correcting FlowType by hand. Returns
+    /// false when it would be a duplicate — the same correction made twice
+    /// should be silent the second time, not add a second entry.
+    /// </summary>
+    public bool AddLearned(string heard, string write)
+    {
+        lock (_gate)
+        {
+            var already = _entries.Any(e =>
+                e.Phrase.Equals(heard, StringComparison.OrdinalIgnoreCase)
+                && e.Replacement.Equals(write, StringComparison.OrdinalIgnoreCase));
+            if (already) return false;
+
+            _entries.Insert(0, new DictionaryEntry
+            {
+                Phrase = heard,
+                Replacement = write,
+                MatchWholeWord = true,
+                LearnedFromCorrection = true,
+            });
+            Save();
+        }
+        Changed?.Invoke();
+        return true;
     }
 
     public void SetEnabled(Guid id, bool enabled)

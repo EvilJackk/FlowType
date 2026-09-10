@@ -13,7 +13,8 @@ public record FormatterOptions(
     string Language = "",
     bool FuzzyVocabulary = true,
     IReadOnlyList<string>? Vocabulary = null,
-    bool EnglishOnlyModel = false)
+    bool EnglishOnlyModel = false,
+    IReadOnlyList<VocabularyMatcher.Alias>? Aliases = null)
 {
     /// <summary>
     /// Whether the English-only filler list may be applied.
@@ -34,13 +35,14 @@ public record FormatterOptions(
     /// decode gave no answer.
     /// </param>
     public static FormatterOptions FromSettings(IReadOnlyList<string>? vocabulary = null,
-        string? decodedLanguage = null, bool englishOnlyModel = false)
+        string? decodedLanguage = null, bool englishOnlyModel = false,
+        IReadOnlyList<VocabularyMatcher.Alias>? aliases = null)
     {
         var s = SettingsStore.Instance.Settings;
         return new FormatterOptions(
             s.RemoveFillers, s.ScratchThat, s.LineCommands,
             s.PunctuationCommands, s.SmartTrailingPunctuation, s.EnglishVariant,
-            decodedLanguage ?? "", s.FuzzyVocabulary, vocabulary, englishOnlyModel);
+            decodedLanguage ?? "", s.FuzzyVocabulary, vocabulary, englishOnlyModel, aliases);
     }
 }
 
@@ -87,9 +89,11 @@ public static class TextFormatter
         // Explicit rules first — they are the user's stated intent and may
         // expand into whole snippets. The fuzzy pass then catches the
         // mis-hearings no rule was ever written for.
-        if (options.FuzzyVocabulary && options.Vocabulary is { Count: > 0 })
+        if (options.FuzzyVocabulary
+            && (options.Vocabulary is { Count: > 0 } || options.Aliases is { Count: > 0 }))
         {
-            text = VocabularyMatcher.Apply(text, options.Vocabulary);
+            text = VocabularyMatcher.Apply(
+                text, options.Vocabulary ?? Array.Empty<string>(), options.Aliases);
         }
         if (options.SmartTrailingPunctuation) text = StripSmartTrailingPeriod(text);
 

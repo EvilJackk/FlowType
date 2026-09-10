@@ -316,6 +316,11 @@
                                       Checked="Setting_Changed" Unchecked="Setting_Changed"/>
                             <TextBlock Style="{StaticResource Hint}" Margin="26,4,0,0"
                                        Text="Matches by sound as well as spelling, so one entry covers every way a name gets misheard."/>
+                            <CheckBox x:Name="LearnCorrectionsCheck" Margin="0,10,0,0"
+                                      Content="Learn from corrections you type"
+                                      Checked="Setting_Changed" Unchecked="Setting_Changed"/>
+                            <TextBlock Style="{StaticResource Hint}" Margin="26,4,0,0"
+                                       Text="Backspace over a word FlowType got wrong and type the right one — it becomes a dictionary entry and the bar says so. Only watched for a few seconds after FlowType inserts text; keystrokes are never recorded."/>
                         </StackPanel>
                     </Border>
 

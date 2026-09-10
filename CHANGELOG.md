@@ -1,8 +1,42 @@
-# Changelog
+﻿# Changelog
 
 All notable changes to FlowType. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/).
+
+## [1.5.0] — 2026-09-10
+
+FlowType learns your words from the way you fix them.
+
+### Added
+- **Learn from corrections you type** (Settings → Formatting, on by default).
+  When FlowType gets a word wrong, backspace over it and type the right one —
+  the correction becomes a dictionary entry and the bar says *"Added to
+  dictionary: Armor Forger → Arma Reforger"*. It is the same gesture you were
+  making anyway, and a real example of how the model mishears you is worth more
+  than any rule you could think to write in advance.
+  Entries created this way are labelled *(learned from your correction)* in the
+  Dictionary, so a wrong one is obvious and one click from gone. Keystrokes are
+  only watched for a few seconds after FlowType itself inserts text, in the same
+  window, and are never written anywhere — only the dictionary entry is saved.
+  Anything that moves the cursor somewhere FlowType cannot follow (an arrow key,
+  a mouse click, changing window) cancels the watch rather than guessing.
+
+### Fixed
+- **One dictionary entry now covers the whole family of ways a name gets
+  misheard.** A rule you wrote is also a *sample of how the model mishears you*,
+  and a far better anchor for the next mangling than the correct spelling is —
+  so FlowType now matches near-misses of the mis-hearing too. With a single
+  "Armor Forger → Arma Reforger" entry, *Armour Forger*, *Arm of Forger*,
+  *Armored Forger* and *Armor Forge her* are all now caught, where before only
+  the two exact phrases were. This is the reason adding a word to the dictionary
+  so often looked like it did nothing.
+
+### Diagnostics
+- `FlowType.exe --dictcheck ["phrase" …]` — shows exactly what your dictionary
+  is telling the recogniser, the prompt it builds, and what happens to each
+  phrase at every stage. With no arguments it invents plausible mis-hearings of
+  your own terms and reports how many are caught.
 
 ## [1.4.0] — 2026-09-09
 

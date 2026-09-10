@@ -55,6 +55,13 @@ public partial class App : Application
             return;
         }
 
+        var dictIndex = Array.IndexOf(e.Args, "--dictcheck");
+        if (dictIndex >= 0)
+        {
+            RunDictCheck(e.Args.Skip(dictIndex + 1).ToArray());
+            return;
+        }
+
         var conditionIndex = Array.IndexOf(e.Args, "--conditioncheck");
         if (conditionIndex >= 0)
         {
@@ -92,6 +99,7 @@ public partial class App : Application
         _hotkeys = new HotkeyManager(Dispatcher);
         Hotkeys = _hotkeys;
         DictationSession.Instance.Attach(_hotkeys);
+        CorrectionWatcher.Instance.Attach(_hotkeys);
         DictationSession.Instance.SetupNeeded +=
             () => Dispatcher.BeginInvoke(() => ShowMain(settings: true));
         DictationSession.Instance.StateChanged +=
@@ -521,6 +529,108 @@ public partial class App : Application
     }
 
     // ----- Self-test (hidden diagnostic: FlowType.exe --selftest) -----
+
+    /// <summary>
+    /// Runs one or more phrases through the *live* dictionary and formatter and
+    /// shows every stage, so "the dictionary isn't working" becomes a question
+    /// with an answer. With no arguments it reports what the dictionary is
+    /// currently telling the recogniser and runs a built-in set of plausible
+    /// mis-hearings of each of the user's own terms.
+    /// Writes %APPDATA%\FlowType\dictcheck.txt.
+    /// </summary>
+    private void RunDictCheck(string[] phrases)
+    {
+        var log = new StringBuilder();
+        try
+        {
+            var sections = DictionaryStore.Instance.VocabularySections;
+            var entries = DictionaryStore.Instance.Entries;
+            var settings = SettingsStore.Instance.Settings;
+
+            log.AppendLine("FlowType dictionary check");
+            log.AppendLine();
+            log.AppendLine($"entries: {entries.Count}  (fuzzy matching: {(settings.FuzzyVocabulary ? "on" : "OFF")})");
+            foreach (var entry in entries)
+            {
+                var kind = entry.IsVocabularyOnly ? "vocabulary" : "rule";
+                log.AppendLine($"  [{(entry.Enabled ? "on " : "off")}] {kind,-10} '{entry.Phrase}'" +
+                    (entry.IsVocabularyOnly ? "" : $" -> '{entry.Replacement}'") +
+                    $" (whole word: {entry.MatchWholeWord})");
+            }
+            log.AppendLine();
+            log.AppendLine($"told to the recogniser as spellings   : {string.Join(", ", sections.Spellings)}");
+            log.AppendLine($"told to the recogniser as spoken forms: {string.Join(", ", sections.SpokenForms)}");
+            log.AppendLine($"fuzzy-matched mis-hearings           : " +
+                string.Join(", ", DictionaryStore.Instance.Aliases.Select(a => $"{a.Heard} -> {a.Write}")));
+            log.AppendLine();
+            var prompt = Transcriber.BuildPrompt(
+                EnglishVariant.RecognitionPrompt(settings.EnglishVariant),
+                sections.Spellings, sections.SpokenForms);
+            log.AppendLine($"initial prompt ({prompt?.Length ?? 0} chars):");
+            log.AppendLine($"  {prompt ?? "(none)"}");
+            log.AppendLine();
+
+            // With no phrases given, generate plausible mis-hearings of each of
+            // the user's own terms — the question is never "does the exact rule
+            // fire", it is "how far off can the model be and still be caught".
+            var cases = phrases.Length > 0
+                ? phrases.ToList()
+                : sections.Spellings.SelectMany(MisHearings).ToList();
+
+            log.AppendLine($"{"heard",-28} {"after rules",-28} {"after fuzzy",-28} caught");
+            var caught = 0;
+            foreach (var heard in cases)
+            {
+                var afterRules = DictionaryStore.Instance.Apply(heard);
+                var afterFuzzy = settings.FuzzyVocabulary
+                    ? VocabularyMatcher.Apply(afterRules, sections.Spellings,
+                        DictionaryStore.Instance.Aliases)
+                    : afterRules;
+                var hit = sections.Spellings.Any(t =>
+                    afterFuzzy.Contains(t, StringComparison.OrdinalIgnoreCase));
+                if (hit) caught++;
+                log.AppendLine($"{Trunc(heard),-28} {Trunc(afterRules),-28} {Trunc(afterFuzzy),-28} " +
+                    (hit ? "yes" : "NO"));
+            }
+            log.AppendLine();
+            log.AppendLine($"caught {caught}/{cases.Count}");
+        }
+        catch (Exception ex)
+        {
+            log.AppendLine($"DICTCHECK FAILED: {ex}");
+        }
+        finally
+        {
+            AppPaths.EnsureCreated();
+            File.WriteAllText(Path.Combine(AppPaths.DataDir, "dictcheck.txt"), log.ToString());
+            Shutdown();
+        }
+    }
+
+    private static string Trunc(string s) => s.Length <= 27 ? s : s[..24] + "...";
+
+    /// <summary>
+    /// Ways a recogniser plausibly mangles a term: run the words together, split
+    /// them, drop a syllable, swap a vowel, insert a filler word between them.
+    /// </summary>
+    private static IEnumerable<string> MisHearings(string term)
+    {
+        var words = term.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        yield return term;
+        yield return term.ToLowerInvariant();
+        yield return string.Concat(words);
+        if (words.Length >= 2)
+        {
+            yield return string.Join(" ", words[0], "of", words[1]);
+            yield return string.Join(" ", words[0], words[1][..Math.Max(1, words[1].Length - 1)]);
+            yield return string.Join(" ", words[0] + "e", words[1]);
+        }
+        if (term.Length > 4)
+        {
+            yield return term.Replace("a", "o").Replace("A", "O");
+            yield return term[..^1];
+        }
+    }
 
     /// <summary>
     /// Runs the conditioner alone over a folder of 16 kHz WAVs and reports what
@@ -1074,6 +1184,71 @@ public partial class App : Application
             }
             log.AppendLine($"fuzzy vocabulary: {vocabPass}/{vocabVectors.Length} passed");
 
+            // Learning from a typed correction. The whole feature rests on this
+            // one function: given what we inserted, how many backspaces and what
+            // was typed, what did the user actually replace?
+            var correctionVectors = new (string Inserted, int Back, string Typed, string? Heard, string? Write)[]
+            {
+                // Whole last word replaced.
+                ("playing Armor Forger", 6, "Reforger", "Forger", "Reforger"),
+                // Backspaced only the wrong half of a word: the part still in the
+                // document belongs to both sides, so the rule is whole-word.
+                ("open the Workbanch", 5, "bench", "Workbanch", "Workbench"),
+                // Two words replaced.
+                ("I use Charge B", 8, "ChargeBee", "Charge B", "ChargeBee"),
+                // Nothing typed — just a deletion, not a correction.
+                ("playing Armor Forger", 6, "", null, null),
+                // Typed the same thing back.
+                ("playing Forger", 6, "Forger", null, null),
+                // Ate past our own text: we cannot know what was there.
+                ("short", 40, "something", null, null),
+                // A whole sentence is a rewrite, not a term.
+                ("the quick brown fox jumps over it", 30, "a completely different sentence here", null, null),
+                // Addresses are never learned.
+                ("mail roy@example.com", 11, "someone@example.com", null, null),
+            };
+            var correctionPass = 0;
+            foreach (var (inserted, back, typed, heard, write) in correctionVectors)
+            {
+                var got = CorrectionWatcher.Diff(inserted, back, typed);
+                var ok = heard == null
+                    ? got == null
+                    : got != null && got.Value.Heard == heard && got.Value.Write == write;
+                if (ok) correctionPass++;
+                log.AppendLine($"correction {(ok ? "PASS" : "FAIL")}: '{inserted}' -{back} +'{typed}' -> " +
+                    (got == null ? "(none)" : $"'{got.Value.Heard}' -> '{got.Value.Write}'") +
+                    (ok ? "" : $" (expected {(heard == null ? "(none)" : $"'{heard}' -> '{write}'")})"));
+            }
+            log.AppendLine($"learned corrections: {correctionPass}/{correctionVectors.Length} passed");
+
+            // A rule the user wrote is also a *sample of how the model mishears
+            // them*, and a much closer anchor to the next mis-hearing than the
+            // correct spelling. One rule has to cover the family, or the user
+            // ends up writing one rule per mangling forever.
+            var aliases = new[] { new VocabularyMatcher.Alias("Armor Forger", "Arma Reforger") };
+            var aliasVectors = new (string Input, string Expected)[]
+            {
+                ("playing Armour Forger tonight", "playing Arma Reforger tonight"),
+                ("playing arm of forger tonight", "playing Arma Reforger tonight"),
+                ("playing Armored Forger tonight", "playing Arma Reforger tonight"),
+                ("playing Armor Forge her tonight", "playing Arma Reforger tonight"),
+                // Precision: ordinary prose near the alias must survive.
+                ("the armor on the tank", "the armor on the tank"),
+                ("the armour plating is thin", "the armour plating is thin"),
+                ("he was a former arms dealer", "he was a former arms dealer"),
+                ("I need to reforge this sword", "I need to reforge this sword"),
+            };
+            var aliasPass = 0;
+            foreach (var (input, expected) in aliasVectors)
+            {
+                var actual = VocabularyMatcher.Apply(input, Array.Empty<string>(), aliases);
+                var ok = actual == expected;
+                if (ok) aliasPass++;
+                log.AppendLine($"alias {(ok ? "PASS" : "FAIL")}: '{actual}'" +
+                    (ok ? "" : $" (expected '{expected}')"));
+            }
+            log.AppendLine($"mis-hearing aliases: {aliasPass}/{aliasVectors.Length} passed");
+
             // The wiring itself: the live settings must actually carry the
             // dictionary into the formatter, which is where the fuzzy pass runs
             // during a real dictation.
@@ -1189,6 +1364,8 @@ public partial class App : Application
                 && variantPass == variantVectors.Length
                 && guardPass == guardVectors.Length
                 && vocabPass == vocabVectors.Length
+                && aliasPass == aliasVectors.Length
+                && correctionPass == correctionVectors.Length
                 && rulePass == ruleVectors.Length
                 && ruleExtraOk
                 && sectionsOk

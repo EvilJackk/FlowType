@@ -89,6 +89,14 @@ public class AppSettings
     /// </summary>
     public bool FuzzyVocabulary { get; set; } = true;
 
+    /// <summary>
+    /// When you backspace over what FlowType just inserted and type the right
+    /// thing instead, add that correction to the dictionary automatically. The
+    /// keystrokes are only watched for a few seconds after an insertion and are
+    /// never recorded — only the resulting dictionary entry is saved.
+    /// </summary>
+    public bool LearnCorrections { get; set; } = true;
+
     /// <summary>"new line" / "new paragraph" spoken commands.</summary>
     public bool LineCommands { get; set; } = true;
 

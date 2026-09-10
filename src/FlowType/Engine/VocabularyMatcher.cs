@@ -57,23 +57,56 @@ public static class VocabularyMatcher
     private readonly record struct TermKey(int TermIndex, string Key);
 
     /// <summary>
+    /// A form the model is known to produce instead of the right one — the
+    /// "from" side of a rewrite rule the user wrote — and what it should be.
+    /// </summary>
+    public readonly record struct Alias(string Heard, string Write);
+
+    /// <summary>
     /// Rewrite runs of <paramref name="text"/> that are near-misses of one of
     /// <paramref name="terms"/>. Punctuation around a run and the capitalisation
     /// of its first word are preserved.
     /// </summary>
-    public static string Apply(string text, IReadOnlyList<string> terms, double threshold = DefaultThreshold)
+    /// <param name="aliases">
+    /// Known mis-hearings, matched fuzzily as well and replaced with their
+    /// canonical spelling. This is what makes one rule cover a family: a user
+    /// who wrote "Armor Forger → Arma Reforger" also gets "Armour Forger",
+    /// "Arm of Forger" and "Armored Forger" for free, because the recorded
+    /// mis-hearing is a much closer anchor to the next mis-hearing than the
+    /// correct spelling is.
+    /// </param>
+    public static string Apply(string text, IReadOnlyList<string> terms,
+        IReadOnlyList<Alias>? aliases = null, double threshold = DefaultThreshold)
     {
-        if (string.IsNullOrEmpty(text) || terms.Count == 0) return text;
+        if (string.IsNullOrEmpty(text)) return text;
+        if (terms.Count == 0 && aliases is not { Count: > 0 }) return text;
 
+        // Targets are indexed once: the terms themselves, then each alias
+        // pointing at the spelling it should become.
+        var targets = new List<string>(terms);
         var keys = new List<TermKey>(terms.Count + 2);
         for (var i = 0; i < terms.Count; i++) AddKeys(keys, terms[i], i);
+
+        if (aliases is { Count: > 0 })
+        {
+            foreach (var alias in aliases)
+            {
+                if (string.IsNullOrWhiteSpace(alias.Heard) || string.IsNullOrWhiteSpace(alias.Write))
+                {
+                    continue;
+                }
+                targets.Add(alias.Write);
+                AddKeys(keys, alias.Heard, targets.Count - 1);
+            }
+        }
         if (keys.Count == 0) return text;
+        var terms2 = (IReadOnlyList<string>)targets;
 
         // Work line by line so "new paragraph" breaks are not swallowed.
         var lines = text.Split('\n');
         for (var l = 0; l < lines.Length; l++)
         {
-            lines[l] = ApplyToLine(lines[l], terms, keys, threshold);
+            lines[l] = ApplyToLine(lines[l], terms2, keys, threshold);
         }
         return string.Join("\n", lines);
     }

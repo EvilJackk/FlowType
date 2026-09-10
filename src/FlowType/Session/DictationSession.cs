@@ -82,6 +82,12 @@ public sealed class DictationSession
         hotkeys.OtherKeyPressed += OnOtherKeyPressed;
         hotkeys.CancelRequested += OnCancelRequested;
 
+        // A learned correction is worth saying out loud: it is the one thing
+        // FlowType changes about itself without being asked.
+        CorrectionWatcher.Instance.Learned += c =>
+            System.Windows.Application.Current?.Dispatcher.BeginInvoke(() =>
+                Flash?.Invoke($"Added to dictionary: {c.Heard} → {c.Write}", false));
+
         AudioRecorder.Instance.AutoStopRequested += () =>
             System.Windows.Application.Current?.Dispatcher.BeginInvoke(() =>
             {
@@ -237,6 +243,9 @@ public sealed class DictationSession
 
         try
         {
+            // A new dictation invalidates any pending correction watch: the
+            // caret is about to move somewhere we did not put it.
+            CorrectionWatcher.Instance.Disarm();
             AudioRecorder.Instance.StartRecording();
             IsHandsFree = handsFree;
             RecordingStartTime = DateTime.Now;
@@ -346,7 +355,8 @@ public sealed class DictationSession
                 text = TextFormatter.Apply(
                     result.Text,
                     FormatterOptions.FromSettings(
-                        vocabulary, result.Language, model?.EnglishOnly == true),
+                        vocabulary, result.Language, model?.EnglishOnly == true,
+                        DictionaryStore.Instance.Aliases),
                     DictionaryStore.Instance.Apply);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
@@ -413,6 +423,9 @@ public sealed class DictationSession
                 }
                 Flash?.Invoke($"✓ {words} {(words == 1 ? "word" : "words")}", false);
                 attempt.Outcome = AttemptOutcome.Inserted;
+                // If the next thing that happens is the user fixing a word,
+                // that fix is the best possible dictionary entry.
+                CorrectionWatcher.Instance.Arm(outgoing);
             }
             else
             {

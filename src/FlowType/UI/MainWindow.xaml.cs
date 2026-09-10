@@ -218,6 +218,7 @@ public partial class MainWindow : Window
         PasteRadio.IsChecked = s.InsertMethod != "type";
         TypeRadio.IsChecked = s.InsertMethod == "type";
         RestoreClipboardCheck.IsChecked = s.RestoreClipboard;
+        LearnCorrectionsCheck.IsChecked = s.LearnCorrections;
         TrailingSpaceCheck.IsChecked = s.AppendTrailingSpace;
         FillersCheck.IsChecked = s.RemoveFillers;
         ScratchCheck.IsChecked = s.ScratchThat;
@@ -408,6 +409,7 @@ public partial class MainWindow : Window
         s.AutoInsert = AutoInsertCheck.IsChecked == true;
         s.InsertMethod = TypeRadio.IsChecked == true ? "type" : "paste";
         s.RestoreClipboard = RestoreClipboardCheck.IsChecked == true;
+        s.LearnCorrections = LearnCorrectionsCheck.IsChecked == true;
         s.AppendTrailingSpace = TrailingSpaceCheck.IsChecked == true;
         s.RemoveFillers = FillersCheck.IsChecked == true;
         s.ScratchThat = ScratchCheck.IsChecked == true;
@@ -764,6 +766,9 @@ public partial class MainWindow : Window
             var label = entry.IsVocabularyOnly
                 ? $"{entry.Phrase}   (vocabulary)"
                 : $"{entry.Phrase}  →  {entry.Replacement}";
+            // Say where an entry came from, so an automatically learned one that
+            // got it wrong is obvious and one click from gone.
+            if (entry.LearnedFromCorrection) label += "   (learned from your correction)";
             var text = new TextBlock
             {
                 Text = label,

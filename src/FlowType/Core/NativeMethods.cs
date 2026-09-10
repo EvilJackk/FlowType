@@ -1,4 +1,4 @@
-using System.Runtime.InteropServices;
+﻿using System.Runtime.InteropServices;
 
 namespace FlowType.Core;
 
@@ -165,7 +165,23 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     public static extern short GetAsyncKeyState(int vKey);
 
+    /// <summary>Toggle state (Caps Lock) for the calling thread's input queue.</summary>
+    [DllImport("user32.dll")]
+    public static extern short GetKeyState(int vKey);
+
     public static bool IsKeyDown(int vk) => (GetAsyncKeyState(vk) & 0x8000) != 0;
+
+    public const int VK_LBUTTON = 0x01;
+    public const int VK_RBUTTON = 0x02;
+    public const int VK_BACK = 0x08;
+
+    /// <summary>
+    /// Whether a mouse button went down since the last time this was asked.
+    /// GetAsyncKeyState's low bit is exactly that, which is enough to notice a
+    /// click moved the caret without installing a second global hook.
+    /// </summary>
+    public static bool WasClicked() =>
+        (GetAsyncKeyState(VK_LBUTTON) & 0x0001) != 0 || (GetAsyncKeyState(VK_RBUTTON) & 0x0001) != 0;
 
     /// <summary>Post Ctrl+V to the foreground app.</summary>
     public static void SendCtrlV() => Send(
