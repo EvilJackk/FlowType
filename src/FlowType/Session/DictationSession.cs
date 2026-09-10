@@ -349,6 +349,7 @@ public sealed class DictationSession
             // dictionary — must not turn words the model got right into a red
             // error pill.
             string text;
+            FormatterReport formatting = new();
             try
             {
                 var model = ModelCatalog.ById(Transcriber.Instance.CurrentModelId);
@@ -357,7 +358,7 @@ public sealed class DictationSession
                     FormatterOptions.FromSettings(
                         vocabulary, result.Language, model?.EnglishOnly == true,
                         DictionaryStore.Instance.Aliases),
-                    DictionaryStore.Instance.Apply);
+                    DictionaryStore.Instance.Apply, out formatting);
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
@@ -445,7 +446,7 @@ public sealed class DictationSession
                     ModelId = Transcriber.Instance.CurrentModelId,
                 });
             }
-            StatsStore.Instance.Record(words, take.Value.DurationSeconds, appName);
+            StatsStore.Instance.Record(words, take.Value.DurationSeconds, appName, formatting);
 
             SetState(SessionState.Idle, "");
         }

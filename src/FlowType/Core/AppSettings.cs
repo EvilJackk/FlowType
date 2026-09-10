@@ -97,6 +97,26 @@ public class AppSettings
     /// </summary>
     public bool LearnCorrections { get; set; } = true;
 
+    // ----- Automatic formatting -----
+
+    /// <summary>
+    /// Start a new paragraph where you paused between thoughts. The pause is
+    /// measured from the speech itself, not guessed from the words.
+    /// </summary>
+    public bool AutoParagraphs { get; set; } = true;
+
+    /// <summary>"First, ... Second, ..." becomes a numbered list.</summary>
+    public bool AutoLists { get; set; } = true;
+
+    /// <summary>
+    /// Spoken addresses and links ("roy at example dot com"), percentages,
+    /// money, clock times and "quote ... unquote".
+    /// </summary>
+    public bool SmartSymbols { get; set; } = true;
+
+    /// <summary>Write API, GitHub, iPhone and friends the way they are written.</summary>
+    public bool KnownTermCasing { get; set; } = true;
+
     /// <summary>"new line" / "new paragraph" spoken commands.</summary>
     public bool LineCommands { get; set; } = true;
 

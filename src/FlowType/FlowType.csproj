@@ -32,10 +32,10 @@
        a classic heuristic trigger for AV engines; complete, honest identity
        information is the first step to being trusted. -->
   <PropertyGroup>
-    <Version>1.5.0</Version>
-    <AssemblyVersion>1.5.0.0</AssemblyVersion>
-    <FileVersion>1.5.0.0</FileVersion>
-    <InformationalVersion>1.5.0</InformationalVersion>
+    <Version>1.6.0</Version>
+    <AssemblyVersion>1.6.0.0</AssemblyVersion>
+    <FileVersion>1.6.0.0</FileVersion>
+    <InformationalVersion>1.6.0</InformationalVersion>
     <Product>FlowType</Product>
     <AssemblyTitle>FlowType — local voice typing</AssemblyTitle>
     <Description>Offline AI voice dictation for Windows. Speech is transcribed locally with OpenAI Whisper (whisper.cpp); no audio or text leaves the device.</Description>

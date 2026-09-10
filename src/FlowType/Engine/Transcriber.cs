@@ -9,6 +9,9 @@ using Whisper.net.Logger;
 
 namespace FlowType.Engine;
 
+/// <summary>One decoded segment and when it was spoken.</summary>
+public readonly record struct SpeechSegment(string Text, TimeSpan Start, TimeSpan End);
+
 /// <summary>
 /// One transcription attempt: the text, plus why it is empty when it is.
 /// <see cref="TakeVerdict.NoSpeech"/> and <see cref="TakeVerdict.NoInput"/>
@@ -364,11 +367,18 @@ public sealed class Transcriber
                 await using var processor = builder.Build();
                 var sb = new StringBuilder();
                 string? detected = null;
+                var spoken = new List<SpeechSegment>();
                 await foreach (var segment in processor.ProcessAsync(samples, ct))
                 {
                     detected ??= segment.Language;
+                    spoken.Add(new SpeechSegment(segment.Text, segment.Start, segment.End));
                     sb.Append(segment.Text);
                 }
+                // Where the speaker stopped and started again is the only
+                // paragraph signal a transcript ever carries, and it lives in
+                // the segment times — not in the words.
+                var joined = SmartFormatter.JoinSegments(spoken);
+                if (joined.Length > 0) { sb.Clear(); sb.Append(joined); }
                 // What the model actually decoded, not what was asked for. The
                 // formatter needs this: its filler lists are language-specific.
                 var decoded = string.IsNullOrWhiteSpace(detected)

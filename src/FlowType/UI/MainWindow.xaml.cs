@@ -114,11 +114,13 @@ public partial class MainWindow : Window
         if (HomePanel == null || SettingsPanel == null) return;
 
         HomePanel.Visibility = NavHome.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+        InsightsPanel.Visibility = NavInsights.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
         NotesPanel.Visibility = NavNotes.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
         DictionaryPanel.Visibility = NavDictionary.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
         SettingsPanel.Visibility = NavSettings.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
 
         if (NavHome.IsChecked == true) RefreshHome();
+        if (NavInsights.IsChecked == true) RefreshInsights();
         if (NavSettings.IsChecked != true) StopMicTest();
     }
 
@@ -219,6 +221,10 @@ public partial class MainWindow : Window
         TypeRadio.IsChecked = s.InsertMethod == "type";
         RestoreClipboardCheck.IsChecked = s.RestoreClipboard;
         LearnCorrectionsCheck.IsChecked = s.LearnCorrections;
+        AutoParagraphsCheck.IsChecked = s.AutoParagraphs;
+        AutoListsCheck.IsChecked = s.AutoLists;
+        SmartSymbolsCheck.IsChecked = s.SmartSymbols;
+        KnownTermsCheck.IsChecked = s.KnownTermCasing;
         TrailingSpaceCheck.IsChecked = s.AppendTrailingSpace;
         FillersCheck.IsChecked = s.RemoveFillers;
         ScratchCheck.IsChecked = s.ScratchThat;
@@ -410,6 +416,10 @@ public partial class MainWindow : Window
         s.InsertMethod = TypeRadio.IsChecked == true ? "type" : "paste";
         s.RestoreClipboard = RestoreClipboardCheck.IsChecked == true;
         s.LearnCorrections = LearnCorrectionsCheck.IsChecked == true;
+        s.AutoParagraphs = AutoParagraphsCheck.IsChecked == true;
+        s.AutoLists = AutoListsCheck.IsChecked == true;
+        s.SmartSymbols = SmartSymbolsCheck.IsChecked == true;
+        s.KnownTermCasing = KnownTermsCheck.IsChecked == true;
         s.AppendTrailingSpace = TrailingSpaceCheck.IsChecked == true;
         s.RemoveFillers = FillersCheck.IsChecked == true;
         s.ScratchThat = ScratchCheck.IsChecked == true;
@@ -745,6 +755,207 @@ public partial class MainWindow : Window
         if (result == MessageBoxResult.Yes) NotesStore.Instance.Clear();
     }
 
+    // ----- Insights -----
+
+    /// <summary>
+    /// The usage dashboard. Every number here is measured on this machine —
+    /// there is deliberately no "top N% of users" figure, because FlowType
+    /// cannot see any other users and inventing a percentile would be a lie.
+    /// The comparison shown instead is against typing speed, which is a real
+    /// number the user can check.
+    /// </summary>
+    private void RefreshInsights()
+    {
+        var stats = StatsStore.Instance;
+
+        var wpm = stats.AverageWpm;
+        InsightWpm.Text = wpm > 0 ? wpm.ToString("N0") : "—";
+        InsightWpmCompare.Text = wpm > 0
+            ? $"{wpm / (double)StatsStore.AverageTypingWpm:0.#}× the average typing speed of "
+                + $"{StatsStore.AverageTypingWpm} wpm"
+            : "Dictate something to see your pace.";
+        InsightWpmBest.Text = stats.BestWpm > 0 ? $"Your best take: {stats.BestWpm:N0} wpm" : "";
+
+        InsightFixes.Text = stats.TotalFixes.ToString("N0");
+        if (stats.TotalFixes == 0 && stats.TotalUtterances > 0)
+        {
+            // Say why it is zero rather than looking broken: fixes have only
+            // been counted since 1.6, so an existing user starts from nothing.
+            InsightCorrected.Text = "Counted from version 1.6 onwards —";
+            InsightDictFixes.Text = "this fills in as you dictate.";
+            InsightFormatFixes.Text = "";
+        }
+        else
+        {
+            InsightCorrected.Text = $"{stats.WordsCorrected:N0} words corrected";
+            InsightDictFixes.Text = $"{stats.DictionaryFixes:N0} dictionary fixes";
+            InsightFormatFixes.Text = $"{stats.FormattingFixes:N0} paragraphs and list items";
+        }
+
+        InsightWords.Text = stats.TotalWords.ToString("N0");
+        InsightTakes.Text = $"{stats.TotalUtterances:N0} dictations";
+        var minutes = stats.TotalSpeakingSeconds / 60.0;
+        InsightSpeaking.Text = minutes >= 60
+            ? $"{minutes / 60.0:0.#} hours of speaking"
+            : $"{minutes:0.#} minutes of speaking";
+
+        InsightsSubtitle.Text = stats.TotalUtterances == 0
+            ? "Nothing yet — everything here fills in as you dictate."
+            : "Everything measured on this machine. Nothing leaves it.";
+
+        BuildCategoryBars(stats);
+        BuildHeatmap(stats);
+    }
+
+    private void BuildCategoryBars(StatsStore stats)
+    {
+        InsightCategories.Children.Clear();
+        var usage = stats.CategoryUsage;
+        var apps = stats.AppUsage.Count;
+        InsightAppCount.Text = apps == 0 ? "" : $"{apps} app{(apps == 1 ? "" : "s")} used";
+
+        if (usage.Count == 0)
+        {
+            InsightCategories.Children.Add(new TextBlock
+            {
+                Text = "No dictations recorded yet.",
+                Style = (Style)FindResource("Hint"),
+            });
+            return;
+        }
+
+        var total = Math.Max(1, usage.Sum(u => u.Words));
+        foreach (var (kind, words, appCount) in usage)
+        {
+            var share = words / (double)total;
+            var row = new Grid { Margin = new Thickness(0, 0, 0, 8) };
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(150) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+
+            var label = new TextBlock
+            {
+                Text = AppCategory.Label(kind),
+                FontSize = 12.5,
+                Foreground = (Brush)FindResource("MutedBrush"),
+                VerticalAlignment = VerticalAlignment.Center,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+            };
+
+            // Drawn as a filled portion of a track rather than with a ProgressBar,
+            // so it stays correct at any window width.
+            var fill = new Border
+            {
+                Height = 22,
+                CornerRadius = new CornerRadius(6),
+                Background = (Brush)FindResource("AccentBrush"),
+                HorizontalAlignment = HorizontalAlignment.Left,
+            };
+            var track = new Border
+            {
+                Height = 22,
+                CornerRadius = new CornerRadius(6),
+                Background = (Brush)FindResource("InputBrush"),
+                Margin = new Thickness(10, 0, 10, 0),
+                Child = fill,
+            };
+            track.SizeChanged += (_, e) => fill.Width = Math.Max(2, e.NewSize.Width * share);
+
+            var value = new TextBlock
+            {
+                Text = $"{share * 100:0}%   {words:N0} words"
+                    + (appCount > 1 ? $"   ({appCount} apps)" : ""),
+                FontSize = 12,
+                Foreground = (Brush)FindResource("MutedBrush"),
+                VerticalAlignment = VerticalAlignment.Center,
+            };
+
+            Grid.SetColumn(label, 0);
+            Grid.SetColumn(track, 1);
+            Grid.SetColumn(value, 2);
+            row.Children.Add(label);
+            row.Children.Add(track);
+            row.Children.Add(value);
+            InsightCategories.Children.Add(row);
+        }
+    }
+
+    /// <summary>26 weeks of activity; the densest square is your busiest day.</summary>
+    private void BuildHeatmap(StatsStore stats)
+    {
+        const int weeks = 26;
+        InsightHeatmap.Children.Clear();
+        InsightStreak.Text = $"{stats.StreakDays} day streak";
+        var longest = stats.LongestStreakDays;
+        InsightLongest.Text = longest > 0 ? $"longest {longest} day{(longest == 1 ? "" : "s")}" : "";
+
+        var perDay = stats.WordsPerDay;
+        var busiest = Math.Max(1, perDay.Values.DefaultIfEmpty(0).Max());
+
+        // Start on the Sunday at or before the first day shown, so every column
+        // is a whole week and the rows line up with the day names.
+        var lastDay = DateTime.Today;
+        var firstDay = lastDay.AddDays(-(weeks * 7 - 1));
+        firstDay = firstDay.AddDays(-(int)firstDay.DayOfWeek);
+
+        var dayLabels = new StackPanel { Margin = new Thickness(0, 0, 8, 0) };
+        for (var d = 0; d < 7; d++)
+        {
+            dayLabels.Children.Add(new TextBlock
+            {
+                Text = d % 2 == 1 ? ((DayOfWeek)d).ToString()[..3] : "",
+                FontSize = 10,
+                Height = 15,
+                Foreground = (Brush)FindResource("FaintBrush"),
+            });
+        }
+
+        var columns = new StackPanel { Orientation = Orientation.Horizontal };
+        for (var w = 0; w < weeks; w++)
+        {
+            var column = new StackPanel { Margin = new Thickness(0, 0, 3, 0) };
+            for (var d = 0; d < 7; d++)
+            {
+                var day = firstDay.AddDays(w * 7 + d);
+                var future = day > lastDay;
+                var words = perDay.GetValueOrDefault(day.ToString("yyyy-MM-dd"), 0);
+                // A light day still has to read as activity next to a heavy one,
+                // so the scale starts well above zero rather than at it.
+                var strength = words == 0 ? 0.0 : 0.30 + 0.70 * Math.Min(1.0, words / (double)busiest);
+                var cell = new Border
+                {
+                    Width = 12,
+                    Height = 12,
+                    Margin = new Thickness(0, 0, 0, 3),
+                    CornerRadius = new CornerRadius(3),
+                    Background = words > 0
+                        ? new SolidColorBrush(Color.FromArgb((byte)(255 * strength), 244, 244, 244))
+                        : (Brush)FindResource(future ? "BgBrush" : "InputBrush"),
+                    ToolTip = future ? null : $"{day:ddd d MMM} — {words:N0} words",
+                };
+                column.Children.Add(cell);
+            }
+            columns.Children.Add(column);
+        }
+
+        var grid = new Grid();
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+        grid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+        Grid.SetColumn(dayLabels, 0);
+        Grid.SetColumn(columns, 1);
+        grid.Children.Add(dayLabels);
+        grid.Children.Add(columns);
+        InsightHeatmap.Children.Add(grid);
+
+        InsightHeatmap.Children.Add(new TextBlock
+        {
+            Text = $"Last {weeks} weeks · busiest day {busiest:N0} words",
+            Style = (Style)FindResource("Hint"),
+            FontSize = 11,
+            Margin = new Thickness(0, 10, 0, 0),
+        });
+    }
+
     // ----- Dictionary -----
 
     private void OnDictionaryChanged() => Dispatcher.BeginInvoke(RefreshDictionary);
@@ -831,7 +1042,8 @@ public partial class MainWindow : Window
         var bg = (Brush)FindResource("BgBrush");
         foreach (var (nav, name) in new[]
         {
-            (NavHome, "home"), (NavNotes, "notes"), (NavDictionary, "dictionary"), (NavSettings, "settings"),
+            (NavHome, "home"), (NavInsights, "insights"), (NavNotes, "notes"),
+            (NavDictionary, "dictionary"), (NavSettings, "settings"),
         })
         {
             nav.IsChecked = true;
@@ -839,6 +1051,9 @@ public partial class MainWindow : Window
             Snapshot.Save(root, System.IO.Path.Combine(dir, $"main-{name}.png"), bg);
         }
         Snapshot.Save(SettingsPanel, System.IO.Path.Combine(dir, "main-settings-full.png"), bg);
+        NavInsights.IsChecked = true;
+        UpdateLayout();
+        Snapshot.Save(InsightsPanel, System.IO.Path.Combine(dir, "main-insights-full.png"), bg);
     }
 
     // ----- Shared -----

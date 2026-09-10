@@ -9,6 +9,10 @@ public record FormatterOptions(
     bool LineCommands,
     bool PunctuationCommands,
     bool SmartTrailingPunctuation,
+    bool AutoParagraphs = true,
+    bool AutoLists = true,
+    bool SmartSymbols = true,
+    bool KnownTermCasing = true,
     string EnglishVariant = Engine.EnglishVariant.Off,
     string Language = "",
     bool FuzzyVocabulary = true,
@@ -41,7 +45,9 @@ public record FormatterOptions(
         var s = SettingsStore.Instance.Settings;
         return new FormatterOptions(
             s.RemoveFillers, s.ScratchThat, s.LineCommands,
-            s.PunctuationCommands, s.SmartTrailingPunctuation, s.EnglishVariant,
+            s.PunctuationCommands, s.SmartTrailingPunctuation,
+            s.AutoParagraphs, s.AutoLists, s.SmartSymbols, s.KnownTermCasing,
+            s.EnglishVariant,
             decodedLanguage ?? "", s.FuzzyVocabulary, vocabulary, englishOnlyModel, aliases);
     }
 }
@@ -63,8 +69,14 @@ public record FormatterOptions(
 public static class TextFormatter
 {
     public static string Apply(string raw, FormatterOptions options,
-        Func<string, string>? applyDictionary = null)
+        Func<string, string>? applyDictionary = null) =>
+        Apply(raw, options, applyDictionary, out _);
+
+    /// <param name="report">What was changed, for the Insights page.</param>
+    public static string Apply(string raw, FormatterOptions options,
+        Func<string, string>? applyDictionary, out FormatterReport report)
     {
+        report = new FormatterReport();
         var text = raw;
         if (string.IsNullOrWhiteSpace(text)) return "";
 
@@ -74,7 +86,12 @@ public static class TextFormatter
         var structural = HasStructuralGuard(raw);
 
         if (options.ScratchThat) text = ApplyScratchThat(text);
-        if (options.RemoveFillers) text = RemoveFillers(text, options, structural);
+        if (options.RemoveFillers)
+        {
+            var wordsBefore = CountWords(text);
+            text = RemoveFillers(text, options, structural);
+            report.FillersRemoved = Math.Max(0, wordsBefore - CountWords(text));
+        }
         if (options.LineCommands) text = ApplyLineCommands(text);
         if (options.PunctuationCommands) text = ApplyPunctuationCommands(text);
         // Spelling convention runs before the dictionary so a user's explicit
@@ -85,19 +102,40 @@ public static class TextFormatter
         {
             text = Engine.EnglishVariant.Convert(text, options.EnglishVariant);
         }
-        if (applyDictionary != null) text = applyDictionary(text);
+        if (applyDictionary != null)
+        {
+            var beforeRules = text;
+            text = applyDictionary(text);
+            if (text != beforeRules) report.DictionaryFixes++;
+        }
         // Explicit rules first — they are the user's stated intent and may
         // expand into whole snippets. The fuzzy pass then catches the
         // mis-hearings no rule was ever written for.
         if (options.FuzzyVocabulary
             && (options.Vocabulary is { Count: > 0 } || options.Aliases is { Count: > 0 }))
         {
+            var beforeFuzzy = text;
             text = VocabularyMatcher.Apply(
                 text, options.Vocabulary ?? Array.Empty<string>(), options.Aliases);
+            if (text != beforeFuzzy) report.VocabularyFixes++;
         }
+
+        // The automatic layer — what makes dictation read like writing rather
+        // than a transcript. Addresses before symbols, because "dot com" has to
+        // become one token before anything else looks at the numbers around it.
+        if (options.SmartSymbols)
+        {
+            text = SmartFormatter.ApplyAddresses(text, report);
+            text = SmartFormatter.ApplySymbols(text, report);
+        }
+        if (options.KnownTermCasing) text = SmartFormatter.ApplyKnownTerms(text, report);
+        // Lists last, so the items are already spelled and cased correctly by
+        // the time they are numbered.
+        if (options.AutoLists) text = SmartFormatter.ApplyLists(text, report);
+
         if (options.SmartTrailingPunctuation) text = StripSmartTrailingPeriod(text);
 
-        return FinalCleanup(text, structural);
+        return FinalCleanup(text, structural, options.AutoParagraphs, report);
     }
 
     public static int CountWords(string text) =>
@@ -337,8 +375,26 @@ public static class TextFormatter
         return result;
     }
 
-    private static string FinalCleanup(string text, bool structural)
+    private static string FinalCleanup(string text, bool structural,
+        bool paragraphs, FormatterReport report)
     {
+        // The paragraph marks have survived every transform above as an
+        // ordinary character; now they become real breaks — or vanish, if the
+        // user would rather have one block of text.
+        if (paragraphs)
+        {
+            var breaks = text.Count(c => c == SmartFormatter.ParagraphMark);
+            if (breaks > 0)
+            {
+                report.ParagraphBreaks += breaks;
+                text = text.Replace(SmartFormatter.ParagraphMark.ToString(), "\n");
+            }
+        }
+        else
+        {
+            text = text.Replace(SmartFormatter.ParagraphMark.ToString(), "");
+        }
+
         var result = text.Replace("\r\n", "\n").Replace('\r', '\n');
         result = Regex.Replace(result, @"\n{3,}", "\n\n");
         if (!structural)

@@ -1055,7 +1055,7 @@ public partial class App : Application
                 TextFormatter.Apply(portuguese, ptOpts) == "Eu vi um carro na rua"
                 && TextFormatter.Apply(portuguese, unknownMultilingual) == "Eu vi um carro na rua"
                 && TextFormatter.Apply("um, hello there", unknownEnglishModel) == "Hello there"
-                && TextFormatter.Apply("hmm, ok then", ptOpts) == "Ok then";
+                && TextFormatter.Apply("hmm, ok then", ptOpts) == "OK then";
             if (fillerGateOk) languagePass++;
             log.AppendLine($"filler gate {(fillerGateOk ? "PASS" : "FAIL")}: " +
                 $"pt='{TextFormatter.Apply(portuguese, ptOpts)}' " +
@@ -1183,6 +1183,94 @@ public partial class App : Application
                     (ok ? "" : $" (expected '{expected}')"));
             }
             log.AppendLine($"fuzzy vocabulary: {vocabPass}/{vocabVectors.Length} passed");
+
+            // Automatic formatting. Every rule gets a "must fire" row and a
+            // "must not fire" row, because a wrong rewrite costs far more than
+            // a missed one — a missed one just leaves what you said.
+            var smartOpts = opts with { PunctuationCommands = false };
+            var smartVectors = new (string Name, string Input, string Expected)[]
+            {
+                // Addresses and links
+                ("email", "my email is roy at example dot com",
+                    "My email is roy@example.com"),
+                ("domain only", "look at example dot com",
+                    "Look at example.com"),
+                ("subdomain", "go to www dot example dot co dot uk",
+                    "Go to www.example.co.uk"),
+                ("not a domain", "the dot matrix printer is old",
+                    "The dot matrix printer is old"),
+                ("not an address", "we arrive at Heathrow tomorrow",
+                    "We arrive at Heathrow tomorrow"),
+                // Symbols, money, time
+                ("percent", "it grew 25 percent last year", "It grew 25% last year"),
+                ("money", "it cost 40 dollars", "It cost $40"),
+                ("time", "the meeting is at 3 30 p.m. sharp",
+                    "The meeting is at 3:30 PM sharp"),
+                ("time no minutes", "call me at 9 am", "Call me at 9 AM"),
+                ("quote", "she said quote this is fine unquote and left",
+                    "She said “this is fine” and left"),
+                ("percent word untouched", "a large percent of them agree",
+                    "A large percent of them agree"),
+                // Known terms
+                ("acronyms", "the api returns json over https",
+                    "The API returns JSON over HTTPS"),
+                ("products", "I pushed it to github from my iphone",
+                    "I pushed it to GitHub from my iPhone"),
+                ("ambiguous left alone", "he told us it was a ram",
+                    "He told us it was a ram"),
+                // Lists
+                ("numbered list", "I need three things. First, buy milk. Second, call Mum. Third, finish the report.",
+                    "I need three things.\n1. Buy milk.\n2. Call Mum.\n3. Finish the report."),
+                ("single marker is not a list", "First of all, I think we should wait.",
+                    "First of all, I think we should wait."),
+                ("number one form", "Two points. Number one, it is late. Number two, it is over budget.",
+                    "Two points.\n1. It is late.\n2. It is over budget."),
+            };
+            var smartPass = 0;
+            foreach (var (name, input, expected) in smartVectors)
+            {
+                var actual = TextFormatter.Apply(input, smartOpts);
+                var ok = actual == expected;
+                if (ok) smartPass++;
+                log.AppendLine($"smart[{name}] {(ok ? "PASS" : "FAIL")}: '{Escape(actual)}'" +
+                    (ok ? "" : $" (expected '{Escape(expected)}')"));
+            }
+            log.AppendLine($"automatic formatting: {smartPass}/{smartVectors.Length} passed");
+
+            // Paragraphs come from the pause between spoken segments, so this
+            // is tested on segment timings rather than on text.
+            static SpeechSegment Seg(string t, double a, double b) =>
+                new(t, TimeSpan.FromSeconds(a), TimeSpan.FromSeconds(b));
+            var longEnough = " This sentence exists only to push the word count over the minimum so that "
+                + "paragraph detection is allowed to run at all on this take.";
+            var paraSegments = new[]
+            {
+                Seg("The first thought goes here." + longEnough, 0.0, 6.0),
+                Seg(" And then after a long pause the second thought arrives.", 8.0, 11.0),
+            };
+            var noPauseSegments = new[]
+            {
+                Seg("The first thought goes here." + longEnough, 0.0, 6.0),
+                Seg(" It continues straight on with no pause at all.", 6.1, 9.0),
+            };
+            var paraJoined = SmartFormatter.JoinSegments(paraSegments);
+            var noPauseJoined = SmartFormatter.JoinSegments(noPauseSegments);
+            var shortJoined = SmartFormatter.JoinSegments(new[]
+            {
+                Seg("Short note.", 0.0, 1.0), Seg(" Second bit.", 5.0, 6.0),
+            });
+            var paraOut = TextFormatter.Apply(paraJoined, smartOpts);
+            var noPauseOut = TextFormatter.Apply(noPauseJoined, smartOpts);
+            var paragraphsOk =
+                paraOut.Contains('\n')
+                && !noPauseOut.Contains('\n')
+                && !shortJoined.Contains(SmartFormatter.ParagraphMark)
+                && !TextFormatter.Apply(paraJoined, smartOpts with { AutoParagraphs = false })
+                    .Contains(SmartFormatter.ParagraphMark);
+            log.AppendLine($"paragraphs {(paragraphsOk ? "PASS" : "FAIL")}: " +
+                $"pause->{(paraOut.Contains('\n') ? "break" : "none")}, " +
+                $"no pause->{(noPauseOut.Contains('\n') ? "break" : "none")}, " +
+                $"short take->{(shortJoined.Contains(SmartFormatter.ParagraphMark) ? "break" : "none")}");
 
             // Learning from a typed correction. The whole feature rests on this
             // one function: given what we inserted, how many backspaces and what
@@ -1366,6 +1454,8 @@ public partial class App : Application
                 && vocabPass == vocabVectors.Length
                 && aliasPass == aliasVectors.Length
                 && correctionPass == correctionVectors.Length
+                && smartPass == smartVectors.Length
+                && paragraphsOk
                 && rulePass == ruleVectors.Length
                 && ruleExtraOk
                 && sectionsOk

@@ -4,6 +4,56 @@ All notable changes to FlowType. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/).
 
+## [1.6.0] — 2026-09-10
+
+Dictation that comes out looking like writing, and a page that shows you what
+FlowType has been doing.
+
+### Added — automatic formatting
+Seven new rules, all deterministic and all switchable in Settings → Formatting.
+Every one has a matching "must not fire" test, because a wrong rewrite costs far
+more than a missed one.
+
+- **Paragraphs where you paused.** Stop between two thoughts and FlowType starts
+  a new paragraph. The pause is measured from your actual speech — the gap
+  between spoken segments — not guessed from the words, so it breaks where you
+  breathed rather than where a rule thinks a topic changed. Only on dictations
+  long enough for it to mean something, and only after a finished sentence.
+- **Spoken lists become numbered lists.** *"I need three things. First, buy milk.
+  Second, call Mum. Third, finish the report."* comes out as a real list. Needs at
+  least two markers that actually count upwards, so *"First of all, I think…"*
+  stays a sentence. *"Number one… number two…"* works too.
+- **Addresses and links.** *"roy at example dot com"* → `roy@example.com`;
+  *"www dot example dot co dot uk"* → `www.example.co.uk`. Only when the last
+  piece is a real top-level domain, so *"the dot matrix printer"* is safe — and
+  *"look at example dot com"* becomes *"look at example.com"*, not an email
+  address.
+- **Money, percentages and clock times.** *"25 percent"* → `25%`,
+  *"40 dollars"* → `$40`, *"3 30 p.m."* → `3:30 PM`. Weights and measures are
+  deliberately left as words.
+- **Quotes.** *"quote this is fine unquote"* → *“this is fine”*.
+- **Terms written the way they are written.** api → API, json → JSON,
+  github → GitHub, iphone → iPhone, and about forty more. Genuinely ambiguous
+  ones are deliberately absent: "us", "it", "ram" and "ml" are ordinary English
+  far more often than they are acronyms.
+- Each of these can be turned off on its own.
+
+### Added — Insights
+A new page next to Home showing what FlowType has actually done for you:
+
+- **Words per minute**, with your best single take, compared against the average
+  typing speed of 40 wpm. There is no "top N% of users" figure, because FlowType
+  cannot see any other users and inventing one would be a lie.
+- **Fixes made by FlowType** — filler words removed, mis-heard names put right,
+  dictionary rules fired, paragraphs and list items added. Counted from 1.6
+  onwards.
+- **Total words dictated**, number of dictations and time spent speaking.
+- **Where you dictate** — a breakdown by what kind of app you were in (AI
+  prompts, email, work messages, documents, code, the web). Apps are matched by
+  exact name, never by substring, so nothing lands in the wrong bucket.
+- **Activity** — the last 26 weeks as a grid, with your current and longest
+  streak. Hover any square for that day's word count.
+
 ## [1.5.0] — 2026-09-10
 
 FlowType learns your words from the way you fix them.
