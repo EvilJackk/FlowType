@@ -125,6 +125,12 @@
                             </StackPanel>
                         </RadioButton>
                     </Grid>
+                    <controls:SettingRow BorderThickness="0" Margin="0,10,0,0" Title="Polish long dictations"
+                                         Description="On: a long dictation is polished in parts, so there is no length limit. Off: one pass only, as before — around 1,000 words or more it runs out of time and the text goes in unpolished.">
+                        <CheckBox x:Name="PolishLongCheck" Style="{StaticResource Switch}"
+                                  Checked="PolishLong_Changed" Unchecked="PolishLong_Changed"
+                                  AutomationProperties.Name="Polish long dictations"/>
+                    </controls:SettingRow>
                 </StackPanel>
             </Border>
 

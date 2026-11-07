@@ -663,9 +663,10 @@ public partial class FlowBarWindow : Window
         var text = $"{(int)elapsed.TotalMinutes}:{elapsed.Seconds:00}";
         if (TimeText.Text != text) TimeText.Text = text;
 
-        // The last 30 s before the safety cap turn amber: the take is about to
-        // stop on its own, and that should not come as a surprise.
-        var nearCap = AudioRecorder.MaxDuration - elapsed <= TimeSpan.FromSeconds(30);
+        // The last 30 s before the length cap turn amber: the take is about to
+        // stop on its own, and that should not come as a surprise. No cap set
+        // (the default) = never amber.
+        var nearCap = AudioRecorder.MaxDuration is { } cap && cap - elapsed <= TimeSpan.FromSeconds(30);
         var brush = nearCap ? _warningBrush : _inkMuted;
         if (!ReferenceEquals(TimeText.Foreground, brush)) TimeText.Foreground = brush;
     }

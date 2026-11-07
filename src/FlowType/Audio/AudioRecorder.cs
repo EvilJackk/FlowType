@@ -32,9 +32,18 @@ public readonly record struct RecordedTake(string Path, double DurationSeconds, 
 /// </summary>
 public sealed class AudioRecorder
 {
-    /// <summary>Hands-free sessions auto-stop here so a forgotten mic doesn't run forever.</summary>
-    public static TimeSpan MaxDuration => TimeSpan.FromMinutes(
-        Math.Clamp(SettingsStore.Instance.Settings.MaxRecordingMinutes, 1, 60));
+    /// <summary>
+    /// Where a take auto-stops (and is transcribed), or null for no limit —
+    /// the default since 2.2.0. Only when Settings → "Limit recording length"
+    /// is on, so a forgotten mic doesn't run forever. Applies to every mode.
+    /// </summary>
+    public static TimeSpan? MaxDuration => CapFor(SettingsStore.Instance.Settings);
+
+    /// <summary>The cap <paramref name="settings"/> asks for (pure, for --selftest).</summary>
+    internal static TimeSpan? CapFor(AppSettings settings) =>
+        settings.LimitRecordingLength
+            ? TimeSpan.FromMinutes(Math.Clamp(settings.MaxRecordingMinutes, 1, 60))
+            : null;
 
     /// <summary>The capture format: 16 kHz, what whisper.cpp consumes natively.</summary>
     public const int SampleRate = 16000;
@@ -153,7 +162,7 @@ public sealed class AudioRecorder
     /// </summary>
     public event Action<TimeSpan>? SilentInput;
 
-    /// <summary>The 5-minute cap was hit; the session should stop-and-transcribe.</summary>
+    /// <summary>The length cap (when one is set) was hit; the session should stop-and-transcribe.</summary>
     public event Action? AutoStopRequested;
 
     private AudioRecorder() { }
@@ -573,7 +582,7 @@ public sealed class AudioRecorder
             if (writer != null)
             {
                 writer.Write(e.Buffer, 0, e.BytesRecorded);
-                if (!_autoStopRaised && writer.TotalTime > MaxDuration)
+                if (!_autoStopRaised && MaxDuration is { } cap && writer.TotalTime > cap)
                 {
                     _autoStopRaised = true;
                     shouldAutoStop = true;

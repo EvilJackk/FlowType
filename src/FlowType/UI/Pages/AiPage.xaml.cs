@@ -125,6 +125,7 @@ public partial class AiPage : IMainPage
             PolishAlwaysRadio.IsChecked = s.AiPolish == "always";
             PolishSmartRadio.IsChecked = s.AiPolish is not ("off" or "always");
             CommandModeCheck.IsChecked = s.CommandMode;
+            PolishLongCheck.IsChecked = s.PolishLongDictations;
             BuildCommandKeys(s);
         }
         finally
@@ -146,6 +147,13 @@ public partial class AiPage : IMainPage
         var s = SettingsStore.Instance.Settings;
         s.AiPolish = PolishOffRadio.IsChecked == true ? "off"
             : PolishAlwaysRadio.IsChecked == true ? "always" : "smart";
+        SettingsStore.Instance.Save();
+    }
+
+    private void PolishLong_Changed(object sender, RoutedEventArgs e)
+    {
+        if (_loading) return;
+        SettingsStore.Instance.Settings.PolishLongDictations = PolishLongCheck.IsChecked == true;
         SettingsStore.Instance.Save();
     }
 

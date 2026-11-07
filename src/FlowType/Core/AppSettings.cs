@@ -158,6 +158,14 @@ public class AppSettings
     /// </summary>
     public string AiPolish { get; set; } = "smart";
 
+    /// <summary>
+    /// Polish dictations of any length, in parts (see
+    /// <c>AiWriter.PolishAnyLengthAsync</c>). Off = one pass only, as before
+    /// 2.2.0: past roughly 700 words that pass starts dropping sentences, and
+    /// past ~1,000 it runs out of time and the dictation goes in unpolished.
+    /// </summary>
+    public bool PolishLongDictations { get; set; } = true;
+
     /// <summary>Hold the hotkey and also press Alt to speak an instruction instead of text.</summary>
     public bool CommandMode { get; set; } = true;
 
@@ -224,7 +232,15 @@ public class AppSettings
     /// <summary>Temporarily ignore the hotkey (for gaming, screen shares…).</summary>
     public bool DictationPaused { get; set; } = false;
 
-    /// <summary>Hands-free safety cap; a forgotten mic stops itself.</summary>
+    /// <summary>
+    /// Whether a take stops itself at <see cref="MaxRecordingMinutes"/>. Off
+    /// (the default since 2.2.0) = no time limit: a take runs until you stop
+    /// it. Before 2.2.0 the cap was always on at 5 minutes and cut long takes
+    /// off mid-sentence — in hold mode too, not just hands-free.
+    /// </summary>
+    public bool LimitRecordingLength { get; set; } = false;
+
+    /// <summary>The cap when <see cref="LimitRecordingLength"/> is on, so a forgotten mic stops itself.</summary>
     public int MaxRecordingMinutes { get; set; } = 5;
 
     /// <summary>

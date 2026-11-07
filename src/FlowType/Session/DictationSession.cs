@@ -555,6 +555,15 @@ public sealed class DictationSession
             }
             decodeWatch.Stop();
 
+            // The decode is done, so its budget has done its job. Re-arm the
+            // token for what is left — polish, Command Mode, insertion — each of
+            // which has its own budget too. Without this, a long take decoded
+            // slowly could run out of decode budget during polish, and that
+            // cancellation discarded the whole transcript ("took too long").
+            // Polish gets at most ~8 s per part (and stops early when parts keep
+            // timing out), so this is a backstop for a hang, not a limit.
+            cts.CancelAfter(AiWriter.PostDecodeBudget(TextFormatter.CountWords(result.Text)));
+
             attempt.DecodeMs = decodeWatch.ElapsedMilliseconds;
             attempt.Verdict = result.Verdict;
             attempt.Metrics = result.Metrics;
@@ -889,7 +898,11 @@ public sealed class DictationSession
             if (mode == "always" || AiWriter.NeedsPolish(result.Text, out _))
             {
                 SetState(SessionState.Processing, "Polishing…");
-                var polish = await AiWriter.PolishAsync(text, writing, ct);
+                // Off = the old single pass, which a long dictation outgrows
+                // (it then goes in unpolished — see AiWriter.PolishPartWords).
+                var polish = settings.PolishLongDictations
+                    ? await AiWriter.PolishAnyLengthAsync(text, writing, ct)
+                    : await AiWriter.PolishAsync(text, writing, ct);
                 attempt.AiMs = polish.Milliseconds;
                 aiNote = polish.Reason;
                 if (polish.Applied)

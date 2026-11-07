@@ -406,6 +406,40 @@ public partial class App : Application
                 log.AppendLine($"   out: {styled.Replace("\n", " ⏎ ")}");
             }
 
+            // 2.2: a long dictation. One pass (the pre-2.2 behaviour, still the
+            // "Polish long dictations: off" path) against the split path.
+            // Every sentence is different (a repeated sentence is fair game for
+            // the model to drop, which would muddle the word counts).
+            string[] things = { "release plan", "support queue", "design review", "installer", "billing page",
+                "onboarding flow", "search index", "mobile build", "status page", "backup job", "pricing table" };
+            string[] days = { "Monday", "Tuesday", "Wednesday", "Thursday", "Friday" };
+            string[] people = { "Sam", "Priya", "Marco", "Lena", "Tom", "Aisha", "Ken" };
+            string[] fillers = { "um", "uh", "like", "you know", "basically" };
+            string Sentence(int i) =>
+                $"So {fillers[i % 5]} on point {i + 1}, the {things[i % 11]} still needs work before {days[i % 5]}, " +
+                $"and {people[i % 7]} said they would {(i % 3 == 0 ? "uh take a look" : i % 3 == 1 ? "fix the the tests" : "write it up")} " +
+                $"once the {things[(i + 4) % 11]} is done{(i % 4 == 0 ? ", no wait, after lunch" : "")}.";
+            var longCtx = new WritingContext("Slack", AppKind.WorkMessages, WritingStyles.For(AppKind.WorkMessages), "en");
+            foreach (var sentences in new[] { 12, 24, 36, 48, 64 })
+            {
+                // Shaped like the formatter's output: a pause-paragraph every
+                // few sentences, written as a single "\n".
+                var longText = string.Join("\n", Enumerable.Range(0, (sentences + 3) / 4).Select(p =>
+                    string.Join(" ", Enumerable.Range(p * 4, Math.Min(4, sentences - p * 4)).Select(Sentence))));
+                var inWords = TextFormatter.CountWords(longText);
+                var one = await AiWriter.PolishAsync(longText, longCtx, CancellationToken.None);
+                log.AppendLine($"[{one.Milliseconds,6} ms] long dictation, one pass ({inWords} words): " +
+                    $"{(one.Applied ? "APPLIED" : "KEPT")} {one.Reason} -> {TextFormatter.CountWords(one.Text)} words");
+                var split = await AiWriter.PolishAnyLengthAsync(longText, longCtx, CancellationToken.None);
+                log.AppendLine($"[{split.Milliseconds,6} ms] long dictation, in parts ({inWords} words, " +
+                    $"{AiWriter.SplitForPolish(longText, AiWriter.PolishPartWords).Count} parts): " +
+                    $"{(split.Applied ? "APPLIED" : "KEPT")} {split.Reason} -> {TextFormatter.CountWords(split.Text)} words");
+                if (sentences == 24)
+                {
+                    log.AppendLine($"   out: {split.Text[..Math.Min(500, split.Text.Length)].Replace("\n", " ⏎ ")}…");
+                }
+            }
+
             var command = await AiWriter.CommandAsync("make this more formal",
                 "hey can u send me the report by friday thx", new WritingContext("Outlook", AppKind.Email), CancellationToken.None);
             log.AppendLine($"command (rewrite selection): {command.Text ?? command.Note}");
@@ -1732,11 +1766,12 @@ public partial class App : Application
             }
             log.AppendLine($"non-speech markers: {markerPass}/{markerVectors.Length} passed");
 
-            // Decode budget: generous enough never to cut a working decode short,
-            // bounded enough that a wedge cannot strand the session.
+            // Decode budget: generous enough never to cut a working decode short
+            // (no ceiling since 2.2.0 — a take has no length limit), bounded
+            // relative to the take so a wedge cannot strand the session.
             var budgetVectors = new (double Seconds, int Expected)[]
             {
-                (1.0, 180), (10.0, 180), (30.0, 180), (60.0, 300), (435.0, 1800), (600.0, 1800),
+                (1.0, 180), (10.0, 180), (30.0, 180), (60.0, 300), (435.0, 1800), (600.0, 2460), (3600.0, 14460),
             };
             var budgetPass = 0;
             foreach (var (seconds, expected) in budgetVectors)

@@ -233,6 +233,8 @@ public partial class SettingsPage : IMainPage
             Select(EnglishVariantCombo, s.EnglishVariant);
             Select(BarPositionCombo, s.BarPosition);
             Select(MaxLengthCombo, s.MaxRecordingMinutes.ToString());
+            LimitLengthCheck.IsChecked = s.LimitRecordingLength;
+            MaxLengthCombo.IsEnabled = s.LimitRecordingLength;
             Select(KeepRecordingsCombo, s.KeepRecentRecordings.ToString());
             Select(MicCombo, s.MicDeviceName);
             // Saved elsewhere (onboarding) as a device this list does not have:
@@ -400,6 +402,8 @@ public partial class SettingsPage : IMainPage
         s.EnglishVariant = Ui.ComboValue(EnglishVariantCombo, EnglishVariant.Off);
         s.BarPosition = Ui.ComboValue(BarPositionCombo, "bottom");
         s.MaxRecordingMinutes = int.TryParse(Ui.ComboValue(MaxLengthCombo, "5"), out var mins) ? mins : 5;
+        s.LimitRecordingLength = LimitLengthCheck.IsChecked == true;
+        MaxLengthCombo.IsEnabled = s.LimitRecordingLength;
         s.KeepRecentRecordings = int.TryParse(Ui.ComboValue(KeepRecordingsCombo, "30"), out var keep)
             ? keep : keepBefore;
         s.PlaySounds = SoundsCheck.IsChecked == true;

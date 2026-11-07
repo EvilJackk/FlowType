@@ -26,6 +26,108 @@ internal static class V2SelfTest
         ok &= ContinuationEcho(log);
         // 2.1: learning from history (readers, miners, engine).
         ok &= Learning.LearningSelfTest.Run(log);
+        // 2.2: no length limits.
+        ok &= NoLimits(log);
+        return ok;
+    }
+
+    /// <summary>
+    /// 2.2: a take has no time limit unless one is switched on, and a long
+    /// dictation's polish is split so that no single pass outgrows its budget.
+    /// The split must reproduce the text exactly when joined back — the
+    /// polish is allowed to change words, the splitter is not.
+    /// </summary>
+    private static bool NoLimits(StringBuilder log)
+    {
+        var ok = true;
+
+        // Recording cap.
+        var off = new AppSettings { LimitRecordingLength = false, MaxRecordingMinutes = 5 };
+        var on = new AppSettings { LimitRecordingLength = true, MaxRecordingMinutes = 5 };
+        var huge = new AppSettings { LimitRecordingLength = true, MaxRecordingMinutes = 999 };
+        var capOk = Audio.AudioRecorder.CapFor(off) == null
+            && Audio.AudioRecorder.CapFor(on) == TimeSpan.FromMinutes(5)
+            && Audio.AudioRecorder.CapFor(huge) == TimeSpan.FromMinutes(60)
+            && new AppSettings().LimitRecordingLength == false
+            && new AppSettings().PolishLongDictations;
+        log.AppendLine($"recording cap {(capOk ? "PASS" : "FAIL")}: off={Audio.AudioRecorder.CapFor(off)?.ToString() ?? "none"} " +
+            $"on={Audio.AudioRecorder.CapFor(on)} clamp={Audio.AudioRecorder.CapFor(huge)}");
+        ok &= capOk;
+
+        // Settings written by 2.1 have no LimitRecordingLength key: they must
+        // load as "no limit", whatever MaxRecordingMinutes says.
+        var legacy = System.Text.Json.JsonSerializer.Deserialize<AppSettings>(
+            "{\"MaxRecordingMinutes\": 5, \"AiPolish\": \"smart\"}")!;
+        var legacyOk = !legacy.LimitRecordingLength && legacy.MaxRecordingMinutes == 5
+            && legacy.PolishLongDictations && Audio.AudioRecorder.CapFor(legacy) == null;
+        log.AppendLine($"recording cap legacy settings {(legacyOk ? "PASS" : "FAIL")}");
+        ok &= legacyOk;
+
+        // Speaking pace counts a long dictation and skips a forgotten mic.
+        static Note N(int words, double seconds) => new() { WordCount = words, DurationSeconds = seconds };
+        var longTake = UI.Controls.Metrics.RecentWpm(new[] { N(974, 300.3), N(2392, 859) }, 1);   // ~160–195 wpm
+        var openMic = UI.Controls.Metrics.RecentWpm(new[] { N(150, 60), N(12, 3600) }, 1);        // the hour is skipped
+        var paceOk = longTake is > 150 and < 200 && openMic == 150;
+        log.AppendLine($"speaking pace {(paceOk ? "PASS" : "FAIL")}: long takes {longTake} wpm, with an open mic {openMic} wpm");
+        ok &= paceOk;
+
+        // Polish splitter.
+        var sentence = "We went over the plan for the launch and everyone agreed that the date should move. ";
+        var longPara = string.Concat(Enumerable.Repeat(sentence, 40)).TrimEnd();       // 640 words
+        var list = "Things to bring:\n1. Tent\n2. Stove\n3. Water";
+        var cases = new (string Name, string Text, int Max, int MinParts, int MaxParts)[]
+        {
+            ("short", "Send it to Mark on Tuesday.", 220, 1, 1),
+            ("empty", "", 220, 0, 0),
+            ("one long paragraph", longPara, 220, 3, 4),
+            ("paragraphs", longPara[..300] + ".\n\n" + longPara + "\n\n" + longPara[..200] + ".", 220, 4, 7),
+            ("list kept whole", longPara + "\n\n" + list + "\n\n" + longPara, 220, 6, 9),
+            ("crlf + trailing space", longPara.Replace(". ", ".\r\n\r\n") + "  ", 220, 3, 8),
+            ("no sentence ends", string.Concat(Enumerable.Repeat("and then we talked some more ", 120)), 220, 1, 1),
+            // What a real long take looks like: TextFormatter writes every
+            // pause-paragraph (and every list line) as a single "\n".
+            ("single-newline paragraphs", string.Join("\n", Enumerable.Repeat(
+                string.Concat(Enumerable.Repeat(sentence, 4)).TrimEnd(), 10)), 220, 3, 5),
+            ("single-newline paragraphs, no sentence ends", string.Join("\n", Enumerable.Repeat(
+                string.Concat(Enumerable.Repeat("and then we talked some more ", 12)).TrimEnd(), 10)), 220, 3, 5),
+            ("list after a single newline", longPara + "\n" + list + "\n" + longPara, 220, 6, 9),
+            ("leading and trailing newlines", "\n\n" + longPara.Replace(". ", ".\n") + "\n", 220, 3, 8),
+        };
+        foreach (var (name, text, max, minParts, maxParts) in cases)
+        {
+            var parts = AiWriter.SplitForPolish(text, max);
+            var joined = string.Concat(parts.Select(p => p.Text + p.Separator));
+            var roundTrip = joined == text;
+            var sizesOk = parts.All(p => TextFormatter.CountWords(p.Text) <= max
+                || !System.Text.RegularExpressions.Regex.IsMatch(p.Text.TrimEnd(), @"[.!?…]\s+\S"));
+            var listWhole = !text.Contains(list) || parts.Any(p => p.Text.Contains(list));
+            var countOk = parts.Count >= minParts && parts.Count <= maxParts;
+            var good = roundTrip && sizesOk && listWhole && countOk;
+            ok &= good;
+            log.AppendLine($"polish split {(good ? "PASS" : "FAIL")}: {name} -> {parts.Count} parts " +
+                $"[{string.Join(", ", parts.Select(p => TextFormatter.CountWords(p.Text)))} words]" +
+                (roundTrip ? "" : " ROUND-TRIP MISMATCH") + (sizesOk ? "" : " OVERSIZE") +
+                (listWhole ? "" : " LIST SPLIT"));
+        }
+
+        // The post-decode backstop grows with the text and always covers a
+        // full polish of it (parts × the 8 s per-part budget).
+        var budgetSmall = AiWriter.PostDecodeBudget(10);
+        var budgetBig = AiWriter.PostDecodeBudget(5000);
+        var postOk = budgetSmall >= TimeSpan.FromMinutes(2)
+            && budgetBig >= AiWriter.PolishBudget * (5000 / AiWriter.PolishPartWords + 1)
+            && budgetBig > budgetSmall;
+        log.AppendLine($"post-decode budget {(postOk ? "PASS" : "FAIL")}: 10 words {budgetSmall.TotalSeconds:0} s, 5000 words {budgetBig.TotalSeconds:0} s");
+        ok &= postOk;
+
+        // With no model loaded the long path hands the text back untouched.
+        var untouched = AiWriter.PolishAnyLengthAsync(longPara, new WritingContext(), CancellationToken.None)
+            .GetAwaiter().GetResult();
+        var fallbackOk = !LocalLlm.Instance.IsReady
+            ? untouched.Text == longPara && !untouched.Applied
+            : untouched.Text.Length > 0;
+        log.AppendLine($"polish long, no model {(fallbackOk ? "PASS" : "FAIL")}: applied={untouched.Applied} ({untouched.Reason})");
+        ok &= fallbackOk;
         return ok;
     }
 

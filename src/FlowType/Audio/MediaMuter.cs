@@ -110,9 +110,11 @@ public sealed class MediaMuter
     private const float SilentVolume = 0.0001f;
 
     /// <summary>
-    /// Backstop: a hold longer than any possible dictation (the recorder caps
-    /// at 60 minutes) means some exit path forgot to restore. Give the audio
-    /// back rather than leave it silent until the next dictation.
+    /// Backstop: a hold that outlives the take means some exit path forgot to
+    /// restore. Give the audio back rather than leave it silent until the next
+    /// dictation. Since 2.2.0 a take has no length limit by default, so when
+    /// this fires while the recorder is still recording it re-arms instead of
+    /// un-muting in the middle of a long dictation.
     /// </summary>
     private static readonly TimeSpan MaxHold = TimeSpan.FromMinutes(65);
 
@@ -599,8 +601,27 @@ public sealed class MediaMuter
     private void ArmWatchdog()
     {
         _watchdog?.Dispose();
-        _watchdog = new System.Threading.Timer(_ => _ = RestoreAsync(), null,
+        _watchdog = new System.Threading.Timer(_ => OnWatchdog(), null,
             MaxHold, Timeout.InfiniteTimeSpan);
+    }
+
+    /// <summary>
+    /// The <see cref="MaxHold"/> backstop fired. A take still in progress is a
+    /// long dictation, not a forgotten restore: check again later. Re-armed
+    /// through the gate so it never races a real restore's watchdog reset.
+    /// </summary>
+    private void OnWatchdog()
+    {
+        if (AudioRecorder.Instance.IsRecording)
+        {
+            _ = RunExclusiveAsync(() =>
+            {
+                if (_watchdog != null && AudioRecorder.Instance.IsRecording) ArmWatchdog();
+                return Task.CompletedTask;
+            });
+            return;
+        }
+        _ = RestoreAsync();
     }
 
     /// <summary>

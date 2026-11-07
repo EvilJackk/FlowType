@@ -250,6 +250,202 @@ public static class AiWriter
         }
     }
 
+    // ----- Long dictations -----
+
+    /// <summary>
+    /// Most words one polish pass is given when a dictation is split. One pass
+    /// is bounded three ways — the 8 s <see cref="PolishBudget"/>, the 1,200
+    /// output-token cap in <see cref="PolishAsync"/>, and the model's 4,096-token
+    /// context — and the budget is the one that bites first. Measured
+    /// 2026-11-07 (<c>--llmcheck</c>, Qwen3-4B Q4_K_M, RTX 4070, Vulkan,
+    /// formatter-shaped text with a "\n" paragraph every 4 sentences), one pass
+    /// vs parts:
+    /// <list type="bullet">
+    /// <item>344 / 689 words: both fine (3.5 vs 4.5 s; 6.7 vs 9.1 s);</item>
+    /// <item>1,033 / 1,376 / 1,837 words: one pass times out at 8 s and the whole
+    ///   dictation goes in unpolished; parts polish it in 13.4 / 18.0 / 24.0 s.</item>
+    /// </list>
+    /// On 689 words of unbroken text (no paragraphs) the one pass also
+    /// "succeeded" while dropping ~90 words of content; the parts did not.
+    /// 220 words is a 1–3 s pass with ample room in the context.
+    /// </summary>
+    internal const int PolishPartWords = 220;
+
+    /// <summary>
+    /// Polish a dictation of any length. Short ones are one
+    /// <see cref="PolishAsync"/> call, exactly as before. Longer ones are split
+    /// at paragraph and sentence boundaries into parts of at most
+    /// <see cref="PolishPartWords"/> words; each part is polished on its own,
+    /// with its own budget and its own guard, so a part the guard rejects (or
+    /// that times out) goes in unpolished while the rest are still cleaned.
+    /// Each part sees the end of the text before it as continuity context.
+    ///
+    /// Same contract as <see cref="PolishAsync"/>: never throws except for the
+    /// caller's own cancellation, never returns worse text than it was given.
+    /// </summary>
+    public static async Task<PolishResult> PolishAnyLengthAsync(string transcript, WritingContext context, CancellationToken ct)
+    {
+        var parts = SplitForPolish(transcript, PolishPartWords);
+        if (parts.Count <= 1) return await PolishAsync(transcript, context, ct);
+
+        var output = new System.Text.StringBuilder(transcript.Length + 64);
+        var applied = 0;
+        var skipped = 0;
+        var timeoutsInARow = 0;
+        long ms = 0;
+        string? firstFailure = null;
+        foreach (var (text, separator) in parts)
+        {
+            // A machine too slow for one part is too slow for the next: after
+            // two time-outs in a row the rest goes in as it is, instead of
+            // spending 8 s per part to the end of an hour-long take.
+            if (timeoutsInARow >= MaxTimeoutsInARow)
+            {
+                output.Append(text).Append(separator);
+                skipped++;
+                continue;
+            }
+
+            // Continuity: what precedes this part — the text box's own content
+            // for the first part, the parts already written after that.
+            var before = output.Length == 0 ? context.TextBefore : output.ToString();
+            var r = await PolishAsync(text, context with { TextBefore = before }, ct);
+            ms += r.Milliseconds;
+            timeoutsInARow = r.Reason == "timed out" ? timeoutsInARow + 1 : 0;
+            if (r.Applied) applied++;
+            else if (r.Reason != "ok") firstFailure ??= r.Reason;
+
+            var piece = r.Applied ? r.Text.Trim() : text;
+            // The model may have turned this part into a list; the next part
+            // must not be glued onto its last item. Only then: a part that
+            // merely ends mid-paragraph keeps its space.
+            var lastLine = piece[(piece.LastIndexOf('\n') + 1)..];
+            var sep = r.Applied && piece.Contains('\n') && ListItem.IsMatch(lastLine)
+                      && !separator.Contains('\n') && separator.Length > 0
+                ? "\n" : separator;
+            output.Append(piece).Append(sep);
+        }
+
+        var reason = applied == parts.Count || firstFailure == null
+            ? $"ok ({parts.Count} parts)"
+            : $"ok ({applied}/{parts.Count} parts; {firstFailure})";
+        if (skipped > 0) reason += $"; {skipped} left unpolished after repeated time-outs";
+        if (applied == 0) reason = firstFailure ?? "ok";
+        return new PolishResult(output.ToString(), applied > 0, reason, ms);
+    }
+
+    /// <summary>Consecutive per-part time-outs after which the rest of a long dictation is left unpolished.</summary>
+    private const int MaxTimeoutsInARow = 2;
+
+    /// <summary>
+    /// The session's hang-breaker for everything after the decode (polish,
+    /// Command Mode, insertion) for a transcript of <paramref name="words"/>
+    /// words: two minutes plus a full polish budget (and slack) per part it
+    /// could be split into. Every one of those steps has its own, shorter
+    /// budget; this only fires on a real hang.
+    /// </summary>
+    public static TimeSpan PostDecodeBudget(int words) =>
+        TimeSpan.FromSeconds(120 + (Math.Max(words, 0) / PolishPartWords + 2) * (PolishBudget.TotalSeconds + 2));
+
+    private static readonly Regex SentenceEnd = new(@"(?<=[.!?…][""'”’)\]]*)\s+(?=\S)", RegexOptions.Compiled);
+
+    /// <summary>A list line as the formatter or the model writes one: "1. ", "2) ", "- ", "• ".</summary>
+    private static readonly Regex ListItem = new(@"^\s*(\d{1,3}[.)]|[-•*–])\s+\S", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Cut text into polish parts of at most <paramref name="maxWords"/> words
+    /// (a single sentence longer than that is kept whole — splitting mid-sentence
+    /// would hand the model half a thought). Line breaks are the preferred cut
+    /// — the formatter writes a pause-paragraph as a single "\n", so every line
+    /// counts, not just blank-line paragraphs; within a line, sentence ends.
+    /// A list item is never cut from the line before it, so a list stays whole
+    /// together with its introduction. Each part carries the exact whitespace
+    /// that followed it, so joining the parts back with their separators
+    /// reproduces <paramref name="text"/> character for character.
+    /// </summary>
+    internal static IReadOnlyList<(string Text, string Separator)> SplitForPolish(string text, int maxWords)
+    {
+        var result = new List<(string, string)>();
+        if (string.IsNullOrEmpty(text)) return result;
+        if (TextFormatter.CountWords(text) <= maxWords)
+        {
+            result.Add((text, ""));
+            return result;
+        }
+
+        // 1. Units: sentences, each with the whitespace that follows it; a
+        //    list item joins the unit before it.
+        var units = new List<(string Text, string Sep, bool ParagraphEnd)>();
+        var lines = Regex.Split(text, @"(\r?\n\s*)");   // keeps the breaks: line, break, line, …
+        for (var p = 0; p < lines.Length; p += 2)
+        {
+            var line = lines[p];
+            var lineSep = p + 1 < lines.Length ? lines[p + 1] : "";
+            if (line.Length == 0) { AppendSeparator(units, lineSep); continue; }
+
+            if (units.Count > 0 && ListItem.IsMatch(line))
+            {
+                var last = units[^1];
+                units[^1] = (last.Text + last.Sep + line, lineSep, true);
+                continue;
+            }
+            var pos = 0;
+            foreach (Match m in SentenceEnd.Matches(line))
+            {
+                units.Add((line[pos..m.Index], m.Value, false));
+                pos = m.Index + m.Length;
+            }
+            units.Add((line[pos..], lineSep, true));
+        }
+
+        // 2. Pack units greedily into parts; a paragraph end is the preferred
+        //    place to close a part that is already more than half full.
+        var current = new System.Text.StringBuilder();
+        var currentWords = 0;
+        var pendingSep = "";
+        foreach (var (unitText, sep, paragraphEnd) in units)
+        {
+            var words = TextFormatter.CountWords(unitText);
+            if (currentWords > 0 && currentWords + words > maxWords)
+            {
+                result.Add((current.ToString(), pendingSep));
+                current.Clear();
+                currentWords = 0;
+                pendingSep = "";
+            }
+            current.Append(pendingSep).Append(unitText);
+            currentWords += words;
+            pendingSep = sep;
+            if (paragraphEnd && currentWords * 2 >= maxWords)
+            {
+                result.Add((current.ToString(), pendingSep));
+                current.Clear();
+                currentWords = 0;
+                pendingSep = "";
+            }
+        }
+        if (current.Length > 0 || pendingSep.Length > 0)
+        {
+            if (current.Length == 0 && result.Count > 0)
+            {
+                var (t, s) = result[^1];
+                result[^1] = (t, s + pendingSep);
+            }
+            else
+            {
+                result.Add((current.ToString(), pendingSep));
+            }
+        }
+        return result;
+    }
+
+    private static void AppendSeparator(List<(string Text, string Sep, bool ParagraphEnd)> units, string sep)
+    {
+        if (units.Count == 0) { units.Add(("", sep, true)); return; }
+        var last = units[^1];
+        units[^1] = (last.Text, last.Sep + sep, last.ParagraphEnd);
+    }
+
     private static readonly string[] Preambles =
     {
         "sure", "here is", "here's", "certainly", "of course", "cleaned text", "cleaned:",

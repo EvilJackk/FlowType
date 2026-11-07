@@ -75,6 +75,9 @@ PC, and one click undoes it all. A quiet daily check queues new suggestions.
   on-screen names right. Per-app **styles**: formal, casual, very casual, excited.
 - **Live transcription** — long dictations are transcribed while you talk, so
   the text is ready about a second after you stop.
+- **No length limits** — talk for as long as you like; a take only ends when
+  you end it, and AI polish handles long dictations in parts. Both are
+  switchable: Settings → *Limit recording length*, AI → *Polish long dictations*.
 - **History you can reuse** — play, transcribe again, undo AI edits;
   **Snippets**; media muted while you dictate; dictations kept out of Win+V history.
 

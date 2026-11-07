@@ -382,8 +382,14 @@
                         <ComboBox x:Name="BarPositionCombo" Width="230" SelectionChanged="Setting_Changed"
                                   AutomationProperties.Name="Flow bar position"/>
                     </controls:SettingRow>
+                    <controls:SettingRow Title="Limit recording length"
+                                         Description="Off: talk as long as you like — a take only ends when you stop it. On: a take stops itself and is transcribed at the length below, so a forgotten mic can't run forever.">
+                        <CheckBox x:Name="LimitLengthCheck" Style="{StaticResource Switch}"
+                                  Checked="Setting_Changed" Unchecked="Setting_Changed"
+                                  AutomationProperties.Name="Limit recording length"/>
+                    </controls:SettingRow>
                     <controls:SettingRow Title="Longest recording"
-                                         Description="Safety cap for hands-free sessions, so a forgotten mic stops itself.">
+                                         Description="Used only when Limit recording length is on.">
                         <ComboBox x:Name="MaxLengthCombo" Width="230" SelectionChanged="Setting_Changed"
                                   AutomationProperties.Name="Longest recording"/>
                     </controls:SettingRow>

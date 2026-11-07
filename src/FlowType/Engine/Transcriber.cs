@@ -43,12 +43,15 @@ public sealed class Transcriber
     /// real time plus a minute of slack covers the worst measured case by a
     /// wide margin (large-v3 beam search on CPU runs about 2x real time), so
     /// this only ever fires on a hang — never on a slow but working machine.
-    /// Clamped to at least three minutes so a one-second utterance still gets
-    /// room for a cold GPU kernel compile, and to half an hour so a stuck
-    /// hands-free session cannot hold the app forever.
+    /// At least three minutes, so a one-second utterance still gets room for a
+    /// cold GPU kernel compile. No upper bound since 2.2.0: takes have no
+    /// length limit by default, and the old half-hour ceiling would have
+    /// cancelled a working decode of anything past ~7 minutes on a slow
+    /// machine. A wedge is still broken — proportionally later — and Esc
+    /// always works.
     /// </summary>
     public static TimeSpan DecodeBudget(double audioSeconds) =>
-        TimeSpan.FromSeconds(Math.Clamp(Math.Ceiling(audioSeconds) * 4 + 60, 180, 1800));
+        TimeSpan.FromSeconds(Math.Max(Math.Ceiling(Math.Max(audioSeconds, 0)) * 4 + 60, 180));
 
     private WhisperFactory? _factory;
     private readonly SemaphoreSlim _lock = new(1, 1);

@@ -298,10 +298,17 @@ internal static class Ui
 /// </summary>
 internal static class Metrics
 {
+    /// <summary>A take slower than this is mostly silence — a mic left open — not speech.</summary>
+    internal const double MinTakeWpm = 30;
+
     /// <summary>
     /// Speaking pace over recent dictations: total words over total speaking
-    /// minutes for the latest 100 takes that had words and were under 400 s
-    /// (a forgotten hands-free mic would otherwise drag the figure to zero).
+    /// minutes for the latest 100 takes that had words and a believable pace
+    /// of their own (a forgotten hands-free mic would otherwise drag the
+    /// figure to zero). Until 2.2.0 that filter was "under 400 s", but takes
+    /// have no length limit now, and a long dictation is exactly the one
+    /// worth counting — so a take is skipped for being mostly silence (under
+    /// <see cref="MinTakeWpm"/>), not for being long.
     /// A result outside 20–250 wpm means the sample is too odd to show, so
     /// the lifetime figure is used instead.
     /// </summary>
@@ -311,7 +318,8 @@ internal static class Metrics
         var taken = 0;
         foreach (var note in newestFirst)
         {
-            if (note.WordCount <= 0 || note.DurationSeconds <= 0 || note.DurationSeconds >= 400) continue;
+            if (note.WordCount <= 0 || note.DurationSeconds <= 0) continue;
+            if (note.WordCount / (note.DurationSeconds / 60.0) < MinTakeWpm) continue;
             words += note.WordCount;
             seconds += note.DurationSeconds;
             if (++taken >= 100) break;

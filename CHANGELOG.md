@@ -4,6 +4,40 @@ All notable changes to FlowType. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/).
 
+## [2.2.0] — 2026-11-07
+
+No more length limits.
+
+### Changed
+- **No time limit on a recording.** Every take used to stop itself at
+  5 minutes — in hold-to-talk too, not just hands-free — and transcribe what
+  it had, which cut long dictations off mid-sentence. A take now runs until
+  you stop it. The old cap is still there as an option: Settings → System →
+  **Limit recording length** (off by default), with the length picker below
+  it. Settings from 2.1 load with the limit off.
+- **AI polish has no length limit.** One polish pass is bounded by an 8 s
+  budget: around 700 words it started dropping sentences, and past about
+  1,000 it timed out and the whole dictation went in unpolished. Long
+  dictations are now polished in parts of up to 220 words, split at paragraph
+  and sentence boundaries (never inside a list), each checked by the same
+  guard — a part the guard rejects goes in unpolished while the rest are
+  still cleaned. AI → **Polish long dictations** (on by default) switches
+  back to the single pass. Measured on an RTX 4070 with Qwen3-4B: 1,033 words
+  polished in 13.4 s, 1,837 words in 24 s, where the single pass gave up. If
+  parts keep timing out (a slow machine), the rest is inserted unpolished
+  after two in a row rather than waiting 8 s per part.
+- The safety timeout on transcription scales with the take and no longer
+  stops at 30 minutes, so a very long take on a slow machine is not cancelled
+  while it is still working. It also no longer runs on into the polish step,
+  where running out could throw a finished transcript away. Esc still cancels
+  at any time.
+- Media muted while you dictate is no longer un-muted after 65 minutes if
+  you are still talking.
+- The flow bar's timer only turns amber near the limit when a limit is set.
+
+There was never a word limit on the text itself: every word of a dictation
+is inserted, however long.
+
 ## [2.1.0] — 2026-10-19
 
 FlowType learns from what you have already written. It has always learned
