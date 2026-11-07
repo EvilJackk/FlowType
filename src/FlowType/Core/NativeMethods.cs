@@ -193,6 +193,21 @@ internal static class NativeMethods
         KeyInput(VK_SHIFT, false), KeyInput(VK_RETURN, false),
         KeyInput(VK_RETURN, true), KeyInput(VK_SHIFT, true));
 
+    /// <summary>Enter on its own — the "press enter" voice command, sent after a paste.</summary>
+    public static void SendEnter() => Send(
+        KeyInput(VK_RETURN, false), KeyInput(VK_RETURN, true));
+
+    public const ushort VK_C = 0x43;
+
+    /// <summary>
+    /// Ctrl+C into the focused app. Used only by Command Mode, and only when
+    /// UI Automation could not tell us what is selected: the app is asked to
+    /// copy its own selection so the instruction has something to work on.
+    /// </summary>
+    public static void SendCtrlC() => Send(
+        KeyInput(VK_CONTROL, false), KeyInput(VK_C, false),
+        KeyInput(VK_C, true), KeyInput(VK_CONTROL, true));
+
     // ----- Window styles (flow bar must never steal focus) -----
 
     public const int GWL_EXSTYLE = -20;
@@ -216,4 +231,127 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     public static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool IsWindow(IntPtr hWnd);
+
+    // InternalGetWindowText reads the caption the window manager already has.
+    // GetWindowText sends WM_GETTEXT instead, which blocks (measured 2.4 s)
+    // when the window belongs to a thread of this process that is busy.
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int InternalGetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
+
+    /// <summary>The window's caption, or "" — never throws.</summary>
+    public static string WindowTitle(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return "";
+        try
+        {
+            var sb = new System.Text.StringBuilder(512);
+            return InternalGetWindowText(hwnd, sb, sb.Capacity) > 0 ? sb.ToString() : "";
+        }
+        catch
+        {
+            return "";
+        }
+    }
+
+    /// <summary>Whether this window belongs to FlowType itself (the flow bar, the main window…).</summary>
+    public static bool IsOwnProcessWindow(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return false;
+        GetWindowThreadProcessId(hwnd, out var pid);
+        return pid == (uint)Environment.ProcessId;
+    }
+
+    // ----- UIPI: can we type into this window at all? -----
+
+    private const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+    private const uint TOKEN_QUERY = 0x0008;
+    private const int TokenIntegrityLevel = 25;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr handle);
+
+    [DllImport("kernel32.dll")]
+    private static extern IntPtr GetCurrentProcess();
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+
+    [DllImport("advapi32.dll", SetLastError = true)]
+    private static extern bool GetTokenInformation(IntPtr token, int infoClass, IntPtr info, int length, out int returned);
+
+    [DllImport("advapi32.dll")]
+    private static extern IntPtr GetSidSubAuthorityCount(IntPtr sid);
+
+    [DllImport("advapi32.dll")]
+    private static extern IntPtr GetSidSubAuthority(IntPtr sid, uint index);
+
+    /// <summary>The mandatory integrity RID (0x2000 medium, 0x3000 high…), or null if unreadable.</summary>
+    private static uint? IntegrityOf(IntPtr process)
+    {
+        if (!OpenProcessToken(process, TOKEN_QUERY, out var token)) return null;
+        var buffer = IntPtr.Zero;
+        try
+        {
+            GetTokenInformation(token, TokenIntegrityLevel, IntPtr.Zero, 0, out var needed);
+            if (needed <= 0) return null;
+            buffer = Marshal.AllocHGlobal(needed);
+            if (!GetTokenInformation(token, TokenIntegrityLevel, buffer, needed, out _)) return null;
+            var sid = Marshal.ReadIntPtr(buffer);   // TOKEN_MANDATORY_LABEL.Label.Sid
+            var count = Marshal.ReadByte(GetSidSubAuthorityCount(sid));
+            if (count == 0) return null;
+            return (uint)Marshal.ReadInt32(GetSidSubAuthority(sid, (uint)(count - 1)));
+        }
+        catch
+        {
+            return null;
+        }
+        finally
+        {
+            if (buffer != IntPtr.Zero) Marshal.FreeHGlobal(buffer);
+            CloseHandle(token);
+        }
+    }
+
+    private static uint? _ownIntegrity;
+
+    /// <summary>
+    /// True only when the window's process runs at a *higher* integrity level
+    /// than FlowType — in practice an app started as administrator while
+    /// FlowType is not. Windows (User Interface Privilege Isolation) silently
+    /// drops synthetic input to such a window, so a paste "succeeds" and
+    /// nothing appears; FlowType copies the text instead and says why.
+    ///
+    /// Wispr Flow's helper decides this from a denied process open. That also
+    /// fires for processes that are merely protected — anti-cheat games among
+    /// them, where pasting works fine — so FlowType compares the two tokens'
+    /// integrity levels and, when it cannot read them, lets the paste go ahead
+    /// exactly as 1.x did.
+    /// </summary>
+    public static bool IsElevatedBeyondUs(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return false;
+        GetWindowThreadProcessId(hwnd, out var pid);
+        if (pid == 0 || pid == (uint)Environment.ProcessId) return false;
+
+        _ownIntegrity ??= IntegrityOf(GetCurrentProcess());
+        if (_ownIntegrity is not { } own) return false;
+
+        var handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid);
+        if (handle == IntPtr.Zero) return false;
+        try
+        {
+            return IntegrityOf(handle) is { } target && target > own;
+        }
+        finally
+        {
+            CloseHandle(handle);
+        }
+    }
 }

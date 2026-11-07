@@ -1,4 +1,4 @@
-using System.Windows;
+﻿using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Media;
 using FlowType.Audio;
@@ -148,6 +148,9 @@ public partial class OnboardingWindow : Window
 
     private void Mic_Changed(object sender, SelectionChangedEventArgs e)
     {
+        // Filling the list fires this too; constructing the window (every
+        // --snapshot run) must not rewrite settings.json.
+        if (_loadingControls) return;
         if (MicCombo.SelectedItem is ComboBoxItem item && item.Tag is string device)
         {
             SettingsStore.Instance.Settings.MicDeviceName = device;

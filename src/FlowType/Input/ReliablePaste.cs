@@ -49,10 +49,17 @@ internal static class ReliablePaste
     /// against a clipboard read from this process instead of firing Ctrl+V into
     /// whatever the user happens to have focused.
     /// </param>
-    public static Task<bool> PasteAsync(string text, bool restoreClipboard, bool sendChord = true)
+    /// <param name="settled">
+    /// Optional: completed once the transaction is over — the target has read
+    /// the text (plus the quiet period) or the timeout passed, and the restore,
+    /// if any, is done. Chunked pastes and "press enter" wait on this so the
+    /// next step can never overtake the paste it follows.
+    /// </param>
+    public static Task<bool> PasteAsync(string text, bool restoreClipboard, bool sendChord = true,
+        TaskCompletionSource? settled = null)
     {
         var pasted = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var thread = new Thread(() => Run(text, restoreClipboard, sendChord, pasted))
+        var thread = new Thread(() => Run(text, restoreClipboard, sendChord, pasted, settled))
         {
             // Deliberately a foreground thread: quitting FlowType while a
             // promise is still unrendered would leave the clipboard holding a
@@ -87,12 +94,22 @@ internal static class ReliablePaste
         /// clipboard — which is exactly the bug this class exists to prevent.
         /// </summary>
         public bool Settled;
+
+        /// <summary>
+        /// A newer paste took over before this one restored: it inherited
+        /// <see cref="Previous"/>, so this one must not restore anything.
+        /// </summary>
+        public bool HandedOver;
     }
+
+    /// <summary>The transaction that currently owns (or last owned) the clipboard, across paste threads.</summary>
+    private static Transaction? _inflight;
+    private static readonly object InflightGate = new();
 
     [ThreadStatic] private static Transaction? _current;
 
     private static void Run(string text, bool restoreClipboard, bool sendChord,
-        TaskCompletionSource<bool> pasted)
+        TaskCompletionSource<bool> pasted, TaskCompletionSource? settled)
     {
         var tx = new Transaction { Text = text, RestoreClipboard = restoreClipboard };
         _current = tx;
@@ -107,7 +124,24 @@ internal static class ReliablePaste
                 return;
             }
 
-            tx.Previous = restoreClipboard ? TryReadClipboardText() : null;
+            // Two pastes can overlap (a dictation right after Alt+Shift+Z, or a
+            // chunked paste). Reading the clipboard now would read the *first*
+            // paste's transcript as "the user's clipboard" and restore that at
+            // the end. Inherit what the first one saved instead, and tell it
+            // not to restore.
+            var inherited = false;
+            lock (InflightGate)
+            {
+                if (_inflight is { Settled: false } earlier)
+                {
+                    tx.Previous = earlier.Previous;
+                    tx.RestoreClipboard = restoreClipboard && earlier.RestoreClipboard;
+                    earlier.HandedOver = true;
+                    inherited = true;
+                }
+                _inflight = tx;
+            }
+            if (!inherited) tx.Previous = restoreClipboard ? TryReadClipboardText() : null;
 
             if (!Publish(tx.Hwnd))
             {
@@ -147,6 +181,11 @@ internal static class ReliablePaste
             }
             _current = null;
             pasted.TrySetResult(false);
+            lock (InflightGate)
+            {
+                if (ReferenceEquals(_inflight, tx)) _inflight = null;
+            }
+            settled?.TrySetResult();
         }
     }
 
@@ -188,14 +227,22 @@ internal static class ReliablePaste
             RenderText(tx);
             CloseClipboard();
         }
-        tx.Settled = true;
+        bool handedOver;
+        lock (InflightGate)
+        {
+            tx.Settled = true;
+            handedOver = tx.HandedOver;
+        }
 
-        if (tx.RestoreClipboard && tx.Previous != null && !tx.OwnershipLost && OwnsClipboard(tx.Hwnd))
+        if (!handedOver && tx.RestoreClipboard && tx.Previous != null && !tx.OwnershipLost && OwnsClipboard(tx.Hwnd))
         {
             if (OpenClipboardWithRetry(tx.Hwnd))
             {
                 EmptyClipboard();
                 var ok = WriteText(tx.Previous);
+                // Putting the user's own clipboard back must not add a second
+                // copy of it to Win+V history either.
+                MarkPrivate();
                 CloseClipboard();
                 if (Tracing) Log($"restored ok={ok} clipboard now='{TryReadClipboardText()}'");
             }
@@ -222,6 +269,35 @@ internal static class ReliablePaste
     /// which is what makes the owner window receive its read receipt.</summary>
     internal static string? ReadClipboardAsConsumer() => TryReadClipboardText();
 
+    /// <summary>
+    /// Put text back on the clipboard (the user's own, after a chunked paste or
+    /// a Command Mode copy) without it showing up in clipboard history.
+    /// </summary>
+    internal static bool RestorePrivate(string text)
+    {
+        if (!OpenClipboardWithRetry(IntPtr.Zero)) return false;
+        try
+        {
+            EmptyClipboard();
+            var ok = WriteText(text);
+            MarkPrivate();
+            return ok;
+        }
+        finally
+        {
+            CloseClipboard();
+        }
+    }
+
+    /// <summary>The clipboard's change counter: any write anywhere bumps it.</summary>
+    internal static uint SequenceNumber() => GetClipboardSequenceNumber();
+
+    /// <summary>The clipboard's text, read the way any app reads it.</summary>
+    internal static string? ReadText() => TryReadClipboardText();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetClipboardSequenceNumber();
+
     internal static bool SeedClipboard(string text)
     {
         if (!OpenClipboardWithRetry(IntPtr.Zero)) return false;
@@ -247,12 +323,50 @@ internal static class ReliablePaste
             // NULL data = delayed rendering: we are promising the text, and
             // Windows will come back and ask for it when someone reads.
             SetClipboardData(CF_UNICODETEXT, IntPtr.Zero);
+            MarkPrivate();
             return true;
         }
         finally
         {
             CloseClipboard();
         }
+    }
+
+    // Windows reads these registered formats to decide what clipboard history
+    // (Win+V) and cloud clipboard may keep. Wispr Flow's native helper tags
+    // every paste this way (found in its decompiled MarkSensitiveContent);
+    // without them each dictation — and each clipboard restore — lands in the
+    // user's clipboard history, and with cloud clipboard on, on Microsoft's
+    // servers. A paste is a transport, not a copy the user asked to keep.
+    private static readonly uint FormatExcludeFromMonitors =
+        RegisterClipboardFormat("ExcludeClipboardContentFromMonitorProcessing");
+    private static readonly uint FormatCanIncludeInHistory =
+        RegisterClipboardFormat("CanIncludeInClipboardHistory");
+    private static readonly uint FormatCanUploadToCloud =
+        RegisterClipboardFormat("CanUploadToCloudClipboard");
+
+    /// <summary>Tag the open clipboard as "do not keep". Best effort; a failure only means history sees it.</summary>
+    private static void MarkPrivate()
+    {
+        SetDword(FormatExcludeFromMonitors, 0);
+        SetDword(FormatCanIncludeInHistory, 0);
+        SetDword(FormatCanUploadToCloud, 0);
+    }
+
+    private static void SetDword(uint format, int value)
+    {
+        if (format == 0) return;
+        var handle = GlobalAlloc(GMEM_MOVEABLE, (UIntPtr)4);
+        if (handle == IntPtr.Zero) return;
+        var target = GlobalLock(handle);
+        if (target == IntPtr.Zero)
+        {
+            GlobalFree(handle);
+            return;
+        }
+        Marshal.WriteInt32(target, value);
+        GlobalUnlock(handle);
+        if (SetClipboardData(format, handle) == IntPtr.Zero) GlobalFree(handle);
     }
 
     /// <summary>Writes the transcript into an already-open clipboard.</summary>
@@ -476,6 +590,9 @@ internal static class ReliablePaste
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetClipboardOwner();
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint RegisterClipboardFormat(string lpszFormat);
 
     [DllImport("user32.dll")]
     private static extern bool IsClipboardFormatAvailable(uint format);

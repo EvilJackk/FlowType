@@ -14,11 +14,14 @@ public sealed class FormatterReport
     public int SymbolsFormatted { get; set; }
     public int TermsRecased { get; set; }
 
+    /// <summary>Dictations the on-device AI cleaned up (and the guard accepted).</summary>
+    public int AiPolishes { get; set; }
+
     /// <summary>Everything that was not a dictionary rule — "words corrected".</summary>
     public int WordsCorrected =>
         FillersRemoved + VocabularyFixes + ListItems + SymbolsFormatted + TermsRecased;
 
-    public int Total => WordsCorrected + DictionaryFixes + ParagraphBreaks;
+    public int Total => WordsCorrected + DictionaryFixes + ParagraphBreaks + AiPolishes;
 }
 
 /// <summary>

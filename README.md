@@ -17,7 +17,8 @@
 
 FlowType is an open Wispr-Flow-style dictation app: hold a key, talk, release —
 clean, formatted text appears wherever your cursor is, in any app. Everything
-runs **100% locally** (OpenAI Whisper via [Whisper.net](https://github.com/sandrohanea/whisper.net)/whisper.cpp).
+runs **100% locally** (OpenAI Whisper via [Whisper.net](https://github.com/sandrohanea/whisper.net)/whisper.cpp,
+and an optional small language model via [llama.cpp](https://github.com/ggml-org/llama.cpp)).
 No audio, no text, no telemetry ever leaves your PC.
 
 ---
@@ -43,15 +44,40 @@ A 4-step wizard gets you going: microphone → AI model → hotkey → live prac
 | Action | How |
 | ------ | --- |
 | Dictate | **Hold** your hotkey, talk, release |
-| Hands-free | **Quick-tap** the hotkey; tap again to finish |
+| Hands-free | **Quick-tap** the hotkey, or press **Space** while holding; tap again to finish |
+| Command Mode | Hold the hotkey and press **Alt**, then speak an instruction ("make this more formal") |
+| Paste / copy last dictation | **Alt+Shift+Z** / **Alt+Shift+X** |
 | Cancel | **Esc** — or press any other key while holding |
 | Toggle by mouse | Click the flow bar at the bottom of your screen |
 | Change hotkey | Settings → Dictation → **Detect key…**, then press it |
 
 Say **"scratch that"** to drop everything before it, **"new line"** /
-**"new paragraph"** for breaks. Filler words (um, uh) are removed automatically.
+**"new paragraph"** for breaks, and **"press enter"** at the end to send.
+Filler words (um, uh) are removed automatically.
 
 ## Features
+
+**New in 2.1 — learn from your writing.** Insights → *Learn from my history*
+looks back over your past dictations — FlowType's own and, if you tick it,
+Wispr Flow's local history — and suggests the names and terms the speech model
+doesn't know, fixes for words it keeps mishearing, and the style you actually
+write in. Optionally it tests itself on your own recordings and shows the
+before/after. Nothing changes until you approve it, everything stays on your
+PC, and one click undoes it all. A quiet daily check queues new suggestions.
+
+**New in 2.0** — see [CHANGELOG.md](CHANGELOG.md) for the details:
+
+- **On-device AI polish and Command Mode** — a small local language model
+  resolves self-corrections ("Thursday, no wait, Friday"), reflows spoken lists
+  and carries out spoken instructions. Optional, guarded, never online.
+- **Fits where it lands** — reads the field you're typing into (locally, never
+  password fields) so dictations continue sentences, space correctly and spell
+  on-screen names right. Per-app **styles**: formal, casual, very casual, excited.
+- **Live transcription** — long dictations are transcribed while you talk, so
+  the text is ready about a second after you stop.
+- **History you can reuse** — play, transcribe again, undo AI edits;
+  **Snippets**; media muted while you dictate; dictations kept out of Win+V history.
+
 
 - **Wispr-style activation** — hold-to-talk, quick-tap for hands-free, Esc to
   cancel. Modifier hotkeys (Ctrl) wait a beat so Ctrl+C never opens the mic.
@@ -136,7 +162,7 @@ pwsh build/publish.ps1
 - **Nothing inserted in a specific app** — Settings → Output → *Type it out*.
 - **Verify your install** — `FlowType.exe --selftest` writes a full pipeline
   report to `%APPDATA%\FlowType\selftest.txt`.
-- **Something went wrong once** — `%APPDATA%\FlowTypettempts.log` has one
+- **Something went wrong once** — `%APPDATA%\FlowType\attempts.log` has one
   line per dictation: timings, audio measurements, outcome. It never contains
   any of your words, so it is safe to attach to a bug report. Turn it off in
   Settings → Privacy.
@@ -144,9 +170,14 @@ pwsh build/publish.ps1
 ## Data
 
 Everything lives in `%APPDATA%\FlowType`: `settings.json`, `notes.json`,
-`dictionary.json`, `stats.json`, `models\ggml-*.bin`, and `attempts.log`
-(measurements only — never any transcribed text). Recordings are temporary WAVs
-deleted immediately after transcription.
+`dictionary.json`, `stats.json`, `models\ggml-*.bin`, the optional
+`llm\*.gguf` language model, `audio\*.wav` (the last N recordings, so a
+dictation can be played or transcribed again — set N to 0 in Settings → Privacy
+to keep none), `learning.json` (when "learn from your writing" last ran, its
+numbers, and hashed keys of suggestions you turned down — no words), and
+`attempts.log` (measurements only — never any transcribed text). Screen context
+and the history read by "learn from your writing" are held in memory and never
+written anywhere.
 
 ## Project layout
 
@@ -154,12 +185,15 @@ deleted immediately after transcription.
 src/FlowType/
 ├── App.xaml(.cs)      # tray, wiring, onboarding gate, --selftest / --keylog
 ├── Core/              # settings, paths, atomic JSON, Win32 interop, injection guard
-├── Audio/             # 16 kHz recorder + mic monitor, sound cues
-├── Engine/            # model catalog/downloader, whisper transcriber (GPU→CPU),
-│                      # text formatter, British/American English
-├── Input/             # hotkey manager (hook + polling watchdog), text injector
-├── Session/           # dictation state machine, notes/dictionary/stats stores
-└── UI/                # flow bar, main window, onboarding wizard, theme
+├── Audio/             # 16 kHz recorder + mic monitor, sound cues, media muter, device watcher
+├── Context/           # UI Automation focused-field reader, local term extraction
+├── Engine/            # whisper transcriber (GPU→CPU) + live chunker, local LLM + AI writer,
+│                      # text formatter, styles, caret fit, British/American English
+├── Input/             # hotkey manager (hook + polling watchdog), text injector, reliable paste
+├── Session/           # dictation state machine, notes/recordings/dictionary/stats, edit learner
+├── Learning/          # "learn from your writing": history readers, miners, personal benchmark
+├── Diagnostics/       # 2.0 self-test vectors
+└── UI/                # flow bar, main window + pages, onboarding wizard, theme
 build/publish.ps1      # release packaging (+ optional code signing)
 ```
 

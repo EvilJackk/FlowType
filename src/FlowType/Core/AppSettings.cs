@@ -125,6 +125,91 @@ public class AppSettings
 
     public bool SmartTrailingPunctuation { get; set; } = true;
 
+    // ----- Styles (per kind of app; see Engine/WritingStyles) -----
+
+    /// <summary>"formal", "casual", "very-casual" or "excited".</summary>
+    public string StylePersonal { get; set; } = "casual";
+    public string StyleWork { get; set; } = "formal";
+    public string StyleEmail { get; set; } = "formal";
+    public string StyleOther { get; set; } = "formal";
+
+    // ----- Context -----
+
+    /// <summary>
+    /// Read the text field you are dictating into (through Windows UI
+    /// Automation, on this PC only) so the dictation fits: no capital in the
+    /// middle of a sentence, correct spacing, and names already in the field
+    /// are spelled the same way. Password fields are never read.
+    /// </summary>
+    public bool UseScreenContext { get; set; } = true;
+
+    /// <summary>Say "press enter" at the end of a dictation to send it.</summary>
+    public bool PressEnterCommand { get; set; } = true;
+
+    // ----- On-device AI (optional; see Engine/LocalLlm) -----
+
+    /// <summary>Catalog id of the local language model, or empty for none.</summary>
+    public string AiModel { get; set; } = "";
+
+    /// <summary>
+    /// "off" — rules only. "smart" — the local model cleans up dictations that
+    /// need it (self-corrections, stutters, spoken lists, long rambles).
+    /// "always" — every dictation. Has no effect until a model is installed.
+    /// </summary>
+    public string AiPolish { get; set; } = "smart";
+
+    /// <summary>Hold the hotkey and also press Alt to speak an instruction instead of text.</summary>
+    public bool CommandMode { get; set; } = true;
+
+    // ----- Audio extras -----
+
+    /// <summary>Silence other apps (music, videos) while the microphone is open.</summary>
+    public bool MuteMediaWhileDictating { get; set; } = true;
+
+    /// <summary>
+    /// Keep this many of the most recent recordings so a dictation can be
+    /// transcribed again from History (with a different model, or after a
+    /// failure). 0 keeps none — audio is deleted right after transcription.
+    /// </summary>
+    public int KeepRecentRecordings { get; set; } = 30;
+
+    /// <summary>
+    /// Transcribe long dictations in the background while you are still
+    /// talking, at natural pauses, so the text is ready almost as soon as you
+    /// stop. Only kicks in past ~20 seconds of speech.
+    /// </summary>
+    public bool LiveTranscription { get; set; } = true;
+
+    // ----- Shortcuts -----
+
+    /// <summary>Alt+Shift+Z pastes the last dictation again; Alt+Shift+X copies it.</summary>
+    public bool PasteLastShortcut { get; set; } = true;
+
+    // ----- Learning from your writing (2.1; see Learning/HistoryLearner) -----
+
+    /// <summary>
+    /// Once a day, while nothing is being dictated, look over new dictations
+    /// for words and fixes worth adding and queue them for review (a dot on
+    /// Insights). Nothing changes until you approve it, unless
+    /// <see cref="AutoAddLearnedWords"/> is on.
+    /// </summary>
+    public bool LearnInBackground { get; set; } = true;
+
+    /// <summary>
+    /// Let that daily run read Wispr Flow's history too (read-only, on this
+    /// PC). Off until you choose Wispr Flow in the review window: another
+    /// app's data is never read without being asked first.
+    /// </summary>
+    public bool LearnFromWispr { get; set; } = false;
+
+    /// <summary>
+    /// Let the daily run add the words it is confident about straight to the
+    /// dictionary, marked "from history" and removable in one click. Words
+    /// only: a rewrite rule or a style change always waits for review, because
+    /// a wrong rule changes every future dictation.
+    /// </summary>
+    public bool AutoAddLearnedWords { get; set; } = false;
+
     // ----- Appearance / system -----
 
     /// <summary>Keep the flow bar visible at the bottom of the screen when idle.</summary>

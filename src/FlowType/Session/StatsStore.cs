@@ -54,7 +54,7 @@ public sealed class StatsStore
             {
                 _data.WordsCorrected += report.WordsCorrected;
                 _data.DictionaryFixes += report.DictionaryFixes;
-                _data.FormattingFixes += report.ParagraphBreaks + report.ListItems;
+                _data.FormattingFixes += report.ParagraphBreaks + report.ListItems + report.AiPolishes;
             }
             // Only from takes long enough for the number to mean something.
             if (words >= 20 && seconds >= 1)

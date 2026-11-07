@@ -1,6 +1,7 @@
 <Window x:Class="FlowType.UI.FlowBarWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:bar="clr-namespace:FlowType.UI.Bar"
         Title="FlowType Bar"
         WindowStyle="None"
         AllowsTransparency="True"
@@ -10,73 +11,249 @@
         ShowActivated="False"
         Focusable="False"
         ResizeMode="NoResize"
-        Width="460" Height="56">
-    <Grid>
-        <!-- Sized to stay out of the way: the pill hugs the taskbar (4 px
-             gap) and never grows past a single text line in height, so it
-             no longer sits on top of chat boxes at the bottom of a window. -->
-        <Border x:Name="Bar"
-                Width="72" Height="22"
-                HorizontalAlignment="Center" VerticalAlignment="Bottom"
-                Margin="0,0,0,4"
-                CornerRadius="14"
-                Background="#F20E0E0E"
-                BorderBrush="#3A3A3A"
-                BorderThickness="1"
-                Cursor="Hand"
-                MouseLeftButtonUp="Bar_Click"
-                ContextMenuOpening="Bar_ContextMenuOpening">
-            <Border.Effect>
-                <DropShadowEffect BlurRadius="10" ShadowDepth="1" Opacity="0.45"/>
-            </Border.Effect>
-            <Border.ContextMenu>
-                <ContextMenu x:Name="BarMenu" Closed="BarMenu_Closed">
-                    <MenuItem x:Name="MenuDictate" Header="Start dictating"
-                              Click="MenuDictate_Click" FontWeight="SemiBold"/>
-                    <Separator/>
-                    <MenuItem Header="Open FlowType" Click="MenuOpen_Click"/>
-                    <MenuItem Header="Settings" Click="MenuSettings_Click"/>
-                    <Separator/>
-                    <MenuItem Header="Hide this bar" Click="MenuHideBar_Click"/>
-                    <MenuItem Header="Quit FlowType" Click="MenuQuit_Click"/>
-                </ContextMenu>
-            </Border.ContextMenu>
+        UseLayoutRounding="True"
+        TextOptions.TextFormattingMode="Display"
+        TextOptions.TextRenderingMode="Grayscale"
+        Width="460" Height="84">
+    <!--
+        The window is a fixed, transparent 460×84 stage; only the pill inside
+        it is ever drawn. It is click-through everywhere except the pill (see
+        UI/Bar/ClickThroughGate.cs for why this beats resizing the window).
 
-            <Grid>
-                <!-- Idle: quiet mini-waveform -->
-                <StackPanel x:Name="IdlePanel" Orientation="Horizontal"
-                            HorizontalAlignment="Center" VerticalAlignment="Center"/>
+        Palette is local on purpose: the bar sits over other people's apps, so
+        it keeps its own near-black/white look whatever the main window's
+        theme does. Only BodyFont comes from Theme.xaml.
+    -->
+    <Window.Resources>
+        <SolidColorBrush x:Key="BarFill" Color="#F20E0E10"/>
+        <SolidColorBrush x:Key="BarFillHover" Color="#F71A1A1E"/>
+        <SolidColorBrush x:Key="BarShadowCaster" Color="#FF0E0E10"/>
+        <SolidColorBrush x:Key="BarStroke" Color="#3A3A40"/>
+        <SolidColorBrush x:Key="BarStrokeHover" Color="#56565E"/>
+        <SolidColorBrush x:Key="RestFill" Color="#990E0E10"/>
+        <SolidColorBrush x:Key="RestStroke" Color="#73FFFFFF"/>
+        <SolidColorBrush x:Key="BarInk" Color="#F4F4F6"/>
+        <SolidColorBrush x:Key="BarInkMuted" Color="#A6A6AD"/>
+        <SolidColorBrush x:Key="BarInkOnLight" Color="#0E0E10"/>
+        <SolidColorBrush x:Key="CommandAccent" Color="#F5B841"/>
+        <SolidColorBrush x:Key="DangerAccent" Color="#FF6B6B"/>
+        <SolidColorBrush x:Key="WarningAccent" Color="#F5B841"/>
+        <SolidColorBrush x:Key="SuccessAccent" Color="#4CD08A"/>
+        <SolidColorBrush x:Key="CaptionFill" Color="#EE121215"/>
+        <SolidColorBrush x:Key="ButtonFill" Color="#2C2C32"/>
+        <SolidColorBrush x:Key="ButtonFillHover" Color="#43434B"/>
 
-                <!-- Recording: dot + live waveform + timer -->
-                <StackPanel x:Name="RecordingPanel" Orientation="Horizontal"
-                            HorizontalAlignment="Center" VerticalAlignment="Center"
-                            Visibility="Collapsed">
-                    <Ellipse x:Name="RecDot" Width="7" Height="7" Fill="#FF5252"
-                             VerticalAlignment="Center"/>
-                    <StackPanel x:Name="BarsPanel" Orientation="Horizontal" Height="18"
-                                Margin="10,0" VerticalAlignment="Center"/>
-                    <TextBlock x:Name="TimeText" Text="0:00" Foreground="#F4F4F4"
-                               FontSize="11" VerticalAlignment="Center"
-                               Width="30" TextAlignment="Right"/>
-                </StackPanel>
+        <!-- Round 18 px buttons inside the hands-free pill. Concentric with
+             the pill's 15 px end caps: (30 − 18) / 2 = 6 px all round. -->
+        <Style x:Key="PillButton" TargetType="Border">
+            <Setter Property="Width" Value="18"/>
+            <Setter Property="Height" Value="18"/>
+            <Setter Property="CornerRadius" Value="9"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Background" Value="{StaticResource ButtonFill}"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="{StaticResource ButtonFillHover}"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
 
-                <!-- Processing -->
-                <StackPanel x:Name="ProcessingPanel" Orientation="Horizontal"
-                            HorizontalAlignment="Center" VerticalAlignment="Center"
-                            Visibility="Collapsed">
-                    <Ellipse x:Name="Dot1" Width="5" Height="5" Fill="#FFFFFF" Margin="1.5,0"/>
-                    <Ellipse x:Name="Dot2" Width="5" Height="5" Fill="#FFFFFF" Margin="1.5,0"/>
-                    <Ellipse x:Name="Dot3" Width="5" Height="5" Fill="#FFFFFF" Margin="1.5,0"/>
-                    <TextBlock Text="Transcribing" Foreground="#BDBDBD" FontSize="11"
-                               Margin="8,0,0,0" VerticalAlignment="Center"/>
-                </StackPanel>
+        <Style x:Key="FinishButton" TargetType="Border" BasedOn="{StaticResource PillButton}">
+            <Setter Property="Background" Value="{StaticResource BarInk}"/>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Background" Value="#FFFFFFFF"/>
+                </Trigger>
+            </Style.Triggers>
+        </Style>
 
-                <!-- Flash / error message -->
-                <TextBlock x:Name="MessageText" Foreground="#F4F4F4" FontSize="11.5"
-                           HorizontalAlignment="Center" VerticalAlignment="Center"
-                           Visibility="Collapsed" MaxWidth="400" TextTrimming="CharacterEllipsis"
-                           Margin="14,0"/>
+        <!-- Tooltips match the pill instead of the system's light default. -->
+        <Style TargetType="ToolTip">
+            <Setter Property="Foreground" Value="{StaticResource BarInk}"/>
+            <Setter Property="FontFamily" Value="{StaticResource BodyFont}"/>
+            <Setter Property="FontSize" Value="12"/>
+            <Setter Property="HasDropShadow" Value="False"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ToolTip">
+                        <Border Background="#F5141417" BorderBrush="{StaticResource BarStroke}"
+                                BorderThickness="1" CornerRadius="8" Padding="10,6">
+                            <ContentPresenter TextOptions.TextFormattingMode="Display"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <!-- Layout rounding and Display text formatting are set here as well as
+         on the Window: the snapshot diagnostic renders Root detached, and
+         these are inherited properties. -->
+    <Grid x:Name="Root"
+          UseLayoutRounding="True"
+          TextOptions.TextFormattingMode="Display"
+          TextOptions.TextRenderingMode="Grayscale">
+        <StackPanel x:Name="Stage"
+                    HorizontalAlignment="Center" VerticalAlignment="Bottom"
+                    Margin="0,0,0,6">
+
+            <!-- Caption: messages that arrive while you are still talking or
+                 while the text is being produced. They must not cover the
+                 waveform, so they float just above (or below, for a top bar)
+                 the pill instead of morphing it. Never clickable. -->
+            <Border x:Name="Caption"
+                    HorizontalAlignment="Center"
+                    Height="22" Padding="10,0" Margin="0,0,0,6"
+                    CornerRadius="11"
+                    Background="{StaticResource CaptionFill}"
+                    BorderBrush="{StaticResource BarStroke}" BorderThickness="1"
+                    IsHitTestVisible="False"
+                    Visibility="Collapsed">
+                <TextBlock x:Name="CaptionText"
+                           FontFamily="{StaticResource BodyFont}" FontSize="11.5"
+                           Foreground="{StaticResource BarInk}"
+                           VerticalAlignment="Center"
+                           MaxWidth="340" TextTrimming="CharacterEllipsis"/>
+            </Border>
+
+            <Grid x:Name="PillHost" HorizontalAlignment="Center">
+                <!-- Shadow lives on its own opaque twin so the pill's text is
+                     never rasterised through an Effect (which blurs it). -->
+                <Border x:Name="PillShadow"
+                        Width="{Binding ActualWidth, ElementName=Pill}"
+                        Height="{Binding ActualHeight, ElementName=Pill}"
+                        CornerRadius="{Binding CornerRadius, ElementName=Pill}"
+                        Background="{StaticResource BarShadowCaster}"
+                        HorizontalAlignment="Center" VerticalAlignment="Center"
+                        IsHitTestVisible="False"
+                        Opacity="0">
+                    <Border.Effect>
+                        <DropShadowEffect BlurRadius="12" ShadowDepth="1" Direction="270"
+                                          Opacity="0.5" Color="Black"/>
+                    </Border.Effect>
+                </Border>
+
+                <Border x:Name="Pill"
+                        Width="44" Height="8"
+                        HorizontalAlignment="Center" VerticalAlignment="Center"
+                        CornerRadius="4"
+                        Background="{StaticResource RestFill}"
+                        BorderBrush="{StaticResource RestStroke}"
+                        BorderThickness="1"
+                        Cursor="Hand"
+                        ToolTipService.InitialShowDelay="350"
+                        ToolTipService.BetweenShowDelay="0"
+                        ToolTipService.Placement="Top"
+                        ToolTipService.VerticalOffset="-6"
+                        MouseLeftButtonUp="Pill_Click"
+                        ContextMenuOpening="Pill_ContextMenuOpening">
+                    <Border.ContextMenu>
+                        <ContextMenu x:Name="BarMenu" Closed="BarMenu_Closed">
+                            <MenuItem x:Name="MenuDictate" Header="Start dictating"
+                                      Click="MenuDictate_Click" FontWeight="SemiBold"/>
+                            <MenuItem x:Name="MenuPasteLast" Header="Paste last dictation"
+                                      Click="MenuPasteLast_Click"/>
+                            <MenuItem x:Name="MenuCopyLast" Header="Copy last dictation"
+                                      Click="MenuCopyLast_Click"/>
+                            <Separator/>
+                            <MenuItem Header="Open FlowType" Click="MenuOpen_Click"/>
+                            <MenuItem Header="Settings" Click="MenuSettings_Click"/>
+                            <Separator/>
+                            <MenuItem Header="Hide this bar" Click="MenuHideBar_Click"/>
+                            <MenuItem Header="Quit FlowType" Click="MenuQuit_Click"/>
+                        </ContextMenu>
+                    </Border.ContextMenu>
+
+                    <bar:CenterStage x:Name="Faces" ClipToBounds="True">
+
+                        <!-- Ready: a drawn microphone (no font glyphs, so it
+                             looks the same on every machine). 16×16 box. -->
+                        <Grid x:Name="MicFace" Width="16" Height="16" Visibility="Collapsed">
+                            <Path Fill="{StaticResource BarInk}"
+                                  Data="M8,1.5 C9.38,1.5 10.5,2.62 10.5,4 L10.5,7.6 C10.5,8.98 9.38,10.1 8,10.1 C6.62,10.1 5.5,8.98 5.5,7.6 L5.5,4 C5.5,2.62 6.62,1.5 8,1.5 Z"/>
+                            <Path Stroke="{StaticResource BarInk}" StrokeThickness="1.4"
+                                  StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                  Data="M3.4,7.4 A4.6,4.6 0 0 0 12.6,7.4 M8,12 L8,14.5 M5.6,14.5 L10.4,14.5"/>
+                        </Grid>
+
+                        <!-- Listening: [✕] waves [Command] [time] [■]. Which
+                             parts show depends on hands-free / command mode. -->
+                        <StackPanel x:Name="ListenFace" Orientation="Horizontal" Visibility="Collapsed">
+                            <Border x:Name="CancelButton" Style="{StaticResource PillButton}"
+                                    Margin="0,0,8,0" ToolTip="Cancel (Esc)"
+                                    MouseLeftButtonUp="CancelButton_Click">
+                                <Path Stroke="#D9D9DE" StrokeThickness="1.4"
+                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                      HorizontalAlignment="Center" VerticalAlignment="Center"
+                                      Data="M0,0 L6,6 M6,0 L0,6"/>
+                            </Border>
+                            <bar:BarWaveform x:Name="Wave" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="CommandLabel" Text="Command"
+                                       FontFamily="{StaticResource BodyFont}" FontSize="12"
+                                       FontWeight="Medium"
+                                       Foreground="{StaticResource CommandAccent}"
+                                       VerticalAlignment="Center" Margin="9,0,0,1"/>
+                            <TextBlock x:Name="TimeText" Text="0:00" Width="32"
+                                       FontFamily="{StaticResource BodyFont}" FontSize="12"
+                                       FontWeight="Medium"
+                                       Typography.NumeralAlignment="Tabular"
+                                       Foreground="{StaticResource BarInkMuted}"
+                                       TextAlignment="Center"
+                                       VerticalAlignment="Center" Margin="6,0,0,1"/>
+                            <Border x:Name="FinishButton" Style="{StaticResource FinishButton}"
+                                    Margin="6,0,0,0" ToolTip="Finish and insert"
+                                    MouseLeftButtonUp="FinishButton_Click">
+                                <Rectangle x:Name="FinishGlyph" Width="7" Height="7"
+                                           RadiusX="1.5" RadiusY="1.5"
+                                           Fill="{StaticResource BarInkOnLight}"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                        </StackPanel>
+
+                        <!-- Processing: spinner, plus what the session says it is
+                             doing ("Polishing…", "Thinking…") when it says anything. -->
+                        <StackPanel x:Name="ProcessingFace" Orientation="Horizontal" Visibility="Collapsed">
+                            <bar:BarSpinner x:Name="Spinner" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="ProcessingText"
+                                       FontFamily="{StaticResource BodyFont}" FontSize="12"
+                                       FontWeight="Medium"
+                                       Foreground="{StaticResource BarInk}"
+                                       VerticalAlignment="Center" Margin="8,0,0,1"/>
+                        </StackPanel>
+
+                        <!-- Errors and toasts: optional drawn status glyph + text
+                             that wraps to two lines at most. -->
+                        <StackPanel x:Name="MessageFace" Orientation="Horizontal" Visibility="Collapsed">
+                            <Grid x:Name="GlyphHost" Width="14" Height="14"
+                                  VerticalAlignment="Top" Margin="0,1,8,0">
+                                <Grid x:Name="SuccessGlyph">
+                                    <Ellipse Fill="{StaticResource SuccessAccent}"/>
+                                    <Path Stroke="{StaticResource BarInkOnLight}" StrokeThickness="1.6"
+                                          StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                          StrokeLineJoin="Round"
+                                          Data="M4.1,7.2 L6.1,9.1 L9.9,5.0"/>
+                                </Grid>
+                                <Grid x:Name="ErrorGlyph">
+                                    <Ellipse Fill="{StaticResource DangerAccent}"/>
+                                    <Path Stroke="{StaticResource BarInkOnLight}" StrokeThickness="1.7"
+                                          StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                          Data="M7,3.6 L7,7.6"/>
+                                    <Ellipse Width="2" Height="2" Margin="6,9.4,6,2.6"
+                                             Fill="{StaticResource BarInkOnLight}"/>
+                                </Grid>
+                            </Grid>
+                            <TextBlock x:Name="MessageText"
+                                       FontFamily="{StaticResource BodyFont}" FontSize="12.5"
+                                       Foreground="{StaticResource BarInk}"
+                                       TextWrapping="Wrap" TextTrimming="CharacterEllipsis"
+                                       LineHeight="16" LineStackingStrategy="BlockLineHeight"
+                                       MaxHeight="32.5"
+                                       VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </bar:CenterStage>
+                </Border>
             </Grid>
-        </Border>
+        </StackPanel>
     </Grid>
 </Window>

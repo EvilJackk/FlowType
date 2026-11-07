@@ -2,6 +2,7 @@
 using System.Text;
 using System.Windows;
 using FlowType.Audio;
+using FlowType.Context;
 using FlowType.Core;
 using FlowType.Engine;
 using FlowType.Input;
@@ -62,6 +63,14 @@ public partial class App : Application
             return;
         }
 
+        // Before --bench: "--learncheck --bench" is this check with the
+        // personal benchmark, not the clip-folder benchmark.
+        if (e.Args.Contains("--learncheck"))
+        {
+            RunLearnCheck(bench: e.Args.Contains("--bench"), useWispr: !e.Args.Contains("--no-wispr"));
+            return;
+        }
+
         var conditionIndex = Array.IndexOf(e.Args, "--conditioncheck");
         if (conditionIndex >= 0)
         {
@@ -73,6 +82,19 @@ public partial class App : Application
         if (benchIndex >= 0)
         {
             RunBench(e.Args.ElementAtOrDefault(benchIndex + 1) ?? "");
+            return;
+        }
+
+        if (e.Args.Contains("--llmcheck"))
+        {
+            RunLlmCheck();
+            return;
+        }
+
+        var liveIndex = Array.IndexOf(e.Args, "--livecheck");
+        if (liveIndex >= 0)
+        {
+            RunLiveCheck(e.Args.ElementAtOrDefault(liveIndex + 1) ?? "");
             return;
         }
 
@@ -95,15 +117,36 @@ public partial class App : Application
 
         AppPaths.EnsureCreated();
         AudioRecorder.CleanupOldRecordings();
+        // If FlowType died while other apps were muted, give them their sound back.
+        MediaMuter.Instance.RestoreAfterCrash();
+        // Keep the recordings archive in step with History (orphans, retention count).
+        _ = Task.Run(() => NotesStore.Instance.ReconcileRecordings());
 
         _hotkeys = new HotkeyManager(Dispatcher);
         Hotkeys = _hotkeys;
         DictationSession.Instance.Attach(_hotkeys);
         CorrectionWatcher.Instance.Attach(_hotkeys);
+        _hotkeys.PasteLastRequested += () => _ = UserActions.PasteLastAsync();
+        // UI Automation's first call costs 50-230 ms; pay it now, not on the first dictation.
+        FocusContext.Prewarm();
+        _hotkeys.CopyLastRequested += UserActions.CopyLast;
         DictationSession.Instance.SetupNeeded +=
-            () => Dispatcher.BeginInvoke(() => ShowMain(settings: true));
+            () => Dispatcher.BeginInvoke(() => ShowMain(page: MainPage.Settings, section: "model"));
         DictationSession.Instance.StateChanged +=
             (_, _) => Dispatcher.BeginInvoke(UpdateTrayMenu);
+
+        // A new microphone is worth a word; a vanished one mid-take is handled
+        // by the recorder itself (it keeps what was captured).
+        AudioDeviceWatcher.Instance.CaptureDeviceAdded += name =>
+            Dispatcher.BeginInvoke(() => DictationSession.Instance.Notify($"New microphone: {name} — pick it in Settings → Microphone"));
+        AudioDeviceWatcher.Instance.CaptureEndpointRemoved += endpoint =>
+            Dispatcher.BeginInvoke(() => DictationSession.Instance.OnCaptureEndpointRemoved(endpoint));
+        AudioDeviceWatcher.Instance.Start();
+        // A crash must not leave the user's music muted until the next start.
+        AppDomain.CurrentDomain.UnhandledException += (_, _) =>
+        {
+            try { MediaMuter.Instance.RestoreAsync().Wait(TimeSpan.FromSeconds(1)); } catch { }
+        };
 
         _bar = new FlowBarWindow();
         _bar.OpenRequested += () => ShowMain();
@@ -112,8 +155,17 @@ public partial class App : Application
 
         SetupTray();
 
-        // Warm the saved model so the first dictation is instant.
-        _ = Transcriber.Instance.InitializeAsync();
+        // Warm the saved models so the first dictation is instant. Speech first
+        // (it is what every dictation needs), then the optional language model
+        // — one at a time, so two large loads never compete for video memory.
+        _ = Task.Run(async () =>
+        {
+            try { await Transcriber.Instance.InitializeAsync(); } catch { }
+            // The daily "learn from your writing" check; its first look is
+            // ten minutes out, well clear of the warm-up.
+            Learning.BackgroundLearner.Start();
+            await LocalLlm.Instance.InitializeAsync();
+        });
 
         if (!SettingsStore.Instance.Settings.OnboardingComplete)
         {
@@ -182,6 +234,13 @@ public partial class App : Application
         _recordMenuItem.Click += (_, _) =>
             Dispatcher.BeginInvoke(() => DictationSession.Instance.Toggle());
         menu.Items.Add(_recordMenuItem);
+
+        // Copy, not paste: opening the tray menu makes FlowType the foreground
+        // window, so a paste from here would land in FlowType itself.
+        // Alt+Shift+Z pastes straight into the app you are in.
+        var copyLast = new WinForms.ToolStripMenuItem("Copy last dictation   (Alt+Shift+Z pastes it)");
+        copyLast.Click += (_, _) => Dispatcher.BeginInvoke(UserActions.CopyLast);
+        menu.Items.Add(copyLast);
 
         // No checkbox glyph: the icon gutter is switched off for a cleaner look,
         // so this item states its state in words instead.
@@ -255,7 +314,7 @@ public partial class App : Application
 
     // ----- Windows -----
 
-    private void ShowMain(bool settings = false)
+    private void ShowMain(bool settings = false, MainPage? page = null, string? section = null)
     {
         if (_main == null)
         {
@@ -272,7 +331,8 @@ public partial class App : Application
             }
         }
         _main.Activate();
-        if (settings) _main.NavigateToSettings();
+        if (page != null) _main.NavigateTo(page.Value, section);
+        else if (settings) _main.NavigateToSettings();
     }
 
     private void QuitApp()
@@ -288,9 +348,533 @@ public partial class App : Application
             _tray.Visible = false;
             _tray.Dispose();
         }
+        RecordingArchive.Instance.StopPlayback();
+        Learning.BackgroundLearner.Stop();
+        // Never leave other apps silenced behind us.
+        try { MediaMuter.Instance.RestoreAsync().Wait(TimeSpan.FromSeconds(2)); } catch { }
+        AudioDeviceWatcher.Instance.Dispose();
         _hotkeys?.Dispose();
         _instanceMutex?.Dispose();
         base.OnExit(e);
+    }
+
+    // ----- On-device AI check (hidden diagnostic: FlowType.exe --llmcheck) -----
+
+    /// <summary>
+    /// Run the AI polish over a fixed set of realistic transcripts and report
+    /// what came back, how long it took, and whether the guard kept it. Writes
+    /// %APPDATA%\FlowType\llmcheck.txt. This is the instrument for prompt and
+    /// guard changes: run it before and after, compare.
+    /// </summary>
+    private async void RunLlmCheck()
+    {
+        var log = new StringBuilder();
+        try
+        {
+            var model = LlmCatalog.ById(SettingsStore.Instance.Settings.AiModel) ?? LlmCatalog.BestDownloaded();
+            if (model == null)
+            {
+                log.AppendLine("No on-device model installed — download one in FlowType → AI.");
+                return;
+            }
+            var load = System.Diagnostics.Stopwatch.StartNew();
+            await LocalLlm.Instance.LoadAsync(model.Id);
+            log.AppendLine($"model {model.Id} loaded in {load.ElapsedMilliseconds} ms on {LocalLlm.Instance.RuntimeLabel}");
+
+            var cases = new (string Text, AppKind Kind)[]
+            {
+                ("So um basically I was thinking we should uh move the meeting to Thursday, no wait, Friday at like 3 PM. And um can you also send me the the quarterly report before then? Thanks.", AppKind.Email),
+                ("Hey can you tell me what time the deploy is going out today", AppKind.WorkMessages),
+                ("I think the the issue is in the hotkey manager. Actually no, it's in the audio recorder, the callback fires after dispose.", AppKind.Code),
+                ("Buy milk eggs bread and also coffee beans", AppKind.Other),
+                ("What is the capital of France", AppKind.AiPrompts),
+                ("Hi Sarah, thanks for the update. I'll review the doc tonight and uh get back to you tomorrow morning. Best, Alex", AppKind.Email),
+                ("lol yeah that was so funny i cant believe he did that", AppKind.PersonalMessages),
+                ("Write a function that returns the sum of two numbers", AppKind.AiPrompts),
+                ("We need to fix three things first the hotkey second the paste and third the um the bar position", AppKind.WorkMessages),
+                ("Okay so the plan is we ship on Monday, sorry, I mean Tuesday, and then we do the retro on Wednesday.", AppKind.WorkMessages),
+            };
+            foreach (var (text, kind) in cases)
+            {
+                var style = WritingStyles.For(kind);
+                var ctx = new WritingContext(AppCategory.Label(kind), kind, style, "en",
+                    DictionaryStore.Instance.VocabularySections.Spellings);
+                var result = await AiWriter.PolishAsync(text, ctx, CancellationToken.None);
+                var styled = WritingStyles.Apply(result.Text, style, ctx.Vocabulary?.ToList());
+                log.AppendLine($"[{result.Milliseconds,5} ms] [{style}] {(result.Applied ? "APPLIED " : "KEPT    ")} {result.Reason}");
+                log.AppendLine($"   in : {text}");
+                log.AppendLine($"   out: {styled.Replace("\n", " ⏎ ")}");
+            }
+
+            var command = await AiWriter.CommandAsync("make this more formal",
+                "hey can u send me the report by friday thx", new WritingContext("Outlook", AppKind.Email), CancellationToken.None);
+            log.AppendLine($"command (rewrite selection): {command.Text ?? command.Note}");
+            var write = await AiWriter.CommandAsync("write a two sentence reply saying I can't make the meeting but will send notes",
+                null, new WritingContext("Slack", AppKind.WorkMessages), CancellationToken.None);
+            log.AppendLine($"command (write at cursor): {write.Text ?? write.Note}");
+            log.AppendLine("LLMCHECK DONE");
+        }
+        catch (Exception ex)
+        {
+            log.AppendLine($"LLMCHECK FAILED: {ex}");
+        }
+        finally
+        {
+            AppPaths.EnsureCreated();
+            File.WriteAllText(Path.Combine(AppPaths.DataDir, "llmcheck.txt"), log.ToString());
+            Shutdown();
+        }
+    }
+
+    // ----- Learn-from-history check (hidden diagnostic: FlowType.exe --learncheck [--bench] [--no-wispr]) -----
+
+    /// <summary>
+    /// Runs "Learn from your writing" over the real histories exactly as the
+    /// button does — FlowType's notes and, unless --no-wispr, Wispr Flow's
+    /// database (read-only) — and, with --bench, the personal benchmark on the
+    /// user's selected speech model (--model &lt;id&gt; overrides, as in
+    /// --livecheck). Writes %APPDATA%\FlowType\learncheck.txt with counts,
+    /// timings and benchmark numbers only: no term, no dictation text, no
+    /// path, no source message — the file is safe to paste anywhere. A dry
+    /// run: nothing is applied and learning.json, attempts.log and settings
+    /// are left as they were. Exit code 0 when the run completed, 1 if not.
+    /// </summary>
+    private async void RunLearnCheck(bool bench, bool useWispr)
+    {
+        var log = new StringBuilder();
+        var ok = false;
+        try
+        {
+            var settings = SettingsStore.Instance.Settings;
+            log.AppendLine($"FlowType learn check {DateTime.Now:yyyy-MM-dd HH:mm}");
+            log.AppendLine($"request: flowtype=yes wispr={(useWispr ? "yes" : "no")} bench={(bench ? "yes" : "no")} " +
+                $"live-transcription={settings.LiveTranscription} accurate={settings.AccurateDecoding}");
+
+            if (bench)
+            {
+                var args = Environment.GetCommandLineArgs();
+                var modelIndex = Array.IndexOf(args, "--model");
+                var modelId = modelIndex >= 0 ? args.ElementAtOrDefault(modelIndex + 1) ?? "" : "";
+                if (string.IsNullOrWhiteSpace(modelId)) modelId = settings.SelectedModel;
+                var loadWatch = System.Diagnostics.Stopwatch.StartNew();
+                await Transcriber.Instance.LoadModelAsync(modelId);
+                log.AppendLine($"model: {modelId} loaded in {loadWatch.ElapsedMilliseconds} ms on {Transcriber.Instance.RuntimeLabel}");
+            }
+
+            var learner = Learning.HistoryLearner.Instance;
+            learner.DryRun = true;
+            var report = await learner.RunAsync(
+                new Learning.LearningRequest(UseFlowType: true, UseWispr: useWispr, RunBench: bench),
+                progress: null, CancellationToken.None);
+
+            foreach (var s in report.Sources)
+            {
+                log.AppendLine($"source {s.Source}: available={s.Available} dictations={s.Dictations} " +
+                    $"with-audio={s.WithAudio} audio={s.AudioSeconds / 60:0.0} min edited={s.Edited} " +
+                    $"problem={(s.Problem == null ? "no" : "yes")}");
+            }
+            var stats = learner.LastStats;
+            log.AppendLine($"read: {report.SamplesRead} dictations " +
+                $"(FlowType {stats?.FlowTypeSamples ?? 0}, Wispr Flow {stats?.WisprSamples ?? 0})");
+            log.AppendLine($"suggestions: {report.Suggestions.Count} (recommended {report.Suggestions.Count(x => x.Recommended)})");
+            foreach (var kind in Enum.GetValues<Learning.SuggestionKind>())
+            {
+                var ofKind = report.OfKind(kind).ToList();
+                // Origins are fixed labels set by the miners; anything else is
+                // counted as "other" so no free text can reach the file.
+                var origins = ofKind.GroupBy(x => KnownOrigins.Contains(x.Origin) ? x.Origin : "other")
+                    .OrderBy(g => g.Key, StringComparer.Ordinal)
+                    .Select(g => $"{g.Key} {g.Count()}");
+                log.AppendLine($"  {kind}: {ofKind.Count} (recommended {ofKind.Count(x => x.Recommended)})" +
+                    (ofKind.Count > 0 ? $" — {string.Join(", ", origins)}" : ""));
+            }
+            log.AppendLine($"notes: {report.Notes.Count}");
+            if (stats != null)
+            {
+                log.AppendLine($"timings: sources {stats.SourcesMs} ms, mining {stats.MiningMs} ms, " +
+                    $"bench {stats.BenchMs} ms, total {stats.TotalMs} ms");
+            }
+            if (report.Bench is { } b)
+            {
+                log.AppendLine($"bench: recordings={b.Recordings} audio={b.AudioSeconds / 60:0.0} min reference-words={b.ReferenceWords} " +
+                    $"agreement before={b.BaselineAccuracy:P1} after={b.LearnedAccuracy:P1}");
+                log.AppendLine($"bench: proposed-word occurrences={b.TermOccurrences} right before={b.TermHitsBaseline} " +
+                    $"after={b.TermHitsLearned}");
+                log.AppendLine($"bench: live-chunks={b.LiveChunks} forced-cuts={b.ForcedCuts} " +
+                    $"real-time-factor={b.RealTimeFactor:0.000} model={b.ModelId} recognition-fixes={b.RecognitionFixes.Count}");
+            }
+            else if (bench)
+            {
+                log.AppendLine("bench: not run (see the notes count; the review window shows why)");
+            }
+            log.AppendLine("LEARNCHECK OK");
+            ok = true;
+        }
+        catch (Exception ex)
+        {
+            // Type and stack only: a message can quote a database error or a term.
+            log.AppendLine($"LEARNCHECK FAILED: {ex.GetType().FullName}");
+            for (var inner = ex.InnerException; inner != null; inner = inner.InnerException)
+            {
+                log.AppendLine($"  inner: {inner.GetType().FullName}");
+            }
+            log.AppendLine(ex.StackTrace ?? "");
+        }
+        finally
+        {
+            try
+            {
+                AppPaths.EnsureCreated();
+                File.WriteAllText(Path.Combine(AppPaths.DataDir, "learncheck.txt"), log.ToString());
+            }
+            catch { }
+            Shutdown(ok ? 0 : 1);
+        }
+    }
+
+    /// <summary>
+    /// The origin labels the miners and the benchmark use (spec §4.2), taken
+    /// from their own constants so a new origin cannot quietly be counted as
+    /// "other". All are compile-time labels, so no free text reaches the file.
+    /// (StyleMiner.EditsOrigin has CorrectionMiner.EditsOrigin's value; the
+    /// set keeps one.)
+    /// </summary>
+    internal static readonly HashSet<string> KnownOrigins = new(StringComparer.Ordinal)
+    {
+        Learning.VocabularyMiner.Origin,
+        Learning.CorrectionMiner.EditsOrigin,
+        Learning.CorrectionMiner.RecognizerOrigin,
+        Learning.CorrectionMiner.FlowTypeRecognizerOrigin,
+        Learning.CorrectionMiner.RecordingsOrigin,
+        Learning.StyleMiner.EditsOrigin,
+        Learning.StyleMiner.WisprOrigin,
+        Learning.WisprDictionaryImport.Origin,
+    };
+
+    // ----- Live transcription check (hidden diagnostic: FlowType.exe --livecheck <wav|folder>) -----
+
+    /// <summary>
+    /// Replays long WAVs through the live (chunked) path and through the
+    /// whole-file path with the same model and settings, and reports where the
+    /// cuts fell, word error rate of each against the sibling .txt (and of live
+    /// against whole-file), and the latency left after release. Pure checks run
+    /// first — the prompt with previous text, the echo guard, the recorder's
+    /// dead-mic and meter helpers — so a run without a model still says
+    /// something. Options: --model &lt;id&gt; (default: the selected model),
+    /// --out &lt;file&gt; (default %APPDATA%\FlowType\livecheck.txt), --mic (also
+    /// record 1.5 s from the microphone — after opening the mic-test monitor,
+    /// the sequence that used to kill the take — and check that
+    /// SamplesCaptured delivered exactly the WAV; only counts are logged).
+    /// </summary>
+    private async void RunLiveCheck(string target)
+    {
+        var log = new StringBuilder();
+        var args = Environment.GetCommandLineArgs();
+        string Arg(string name)
+        {
+            var i = Array.IndexOf(args, name);
+            return i >= 0 ? args.ElementAtOrDefault(i + 1) ?? "" : "";
+        }
+        var outPath = Arg("--out");
+        if (string.IsNullOrWhiteSpace(outPath)) outPath = Path.Combine(AppPaths.DataDir, "livecheck.txt");
+        var allOk = true;
+        try
+        {
+            var s = SettingsStore.Instance.Settings;
+            log.AppendLine($"FlowType live check {DateTime.Now:yyyy-MM-dd HH:mm}");
+            log.AppendLine($"language={s.Language} variant={s.EnglishVariant} accurate={s.AccurateDecoding} gpu={s.UseGpu}");
+            log.AppendLine();
+
+            // --- Prompt with previous text (pure) ---
+            var variant = EnglishVariant.RecognitionPrompt(EnglishVariant.Us) ?? "";
+            var previous = "and that is why the migration slipped by a week. " + SmartFormatter.ParagraphMark
+                + " We moved the billing service over on Tuesday, and so far the error rate has stayed flat in every region.";
+            var withPrevious = Transcriber.BuildPrompt(variant, new[] { "Arma Reforger" }, new[] { "armor forger" }, previous) ?? "";
+            var withoutPrevious = Transcriber.BuildPrompt(variant, new[] { "Arma Reforger" }, new[] { "armor forger" }) ?? "";
+            var longVocabulary = Enumerable.Range(0, 200).Select(i => $"Term{i:000}").ToArray();
+            var cramped = Transcriber.BuildPrompt(variant, longVocabulary, new[] { "spoken one" }, previous) ?? "";
+            var context = Transcriber.PreviousContext(previous, Transcriber.MaxPreviousTextChars) ?? "";
+            var promptOk =
+                withPrevious.StartsWith(variant, StringComparison.Ordinal)
+                && withPrevious.EndsWith("Preferred spellings: Arma Reforger.", StringComparison.Ordinal)
+                && withPrevious.IndexOf("stayed flat", StringComparison.Ordinal) > variant.Length
+                && withPrevious.IndexOf("stayed flat", StringComparison.Ordinal)
+                    < withPrevious.IndexOf("Possible spoken forms:", StringComparison.Ordinal)
+                && !withPrevious.Contains(SmartFormatter.ParagraphMark)
+                && withPrevious.Length <= Transcriber.MaxPromptChars
+                && context.Length <= Transcriber.MaxPreviousTextChars
+                && cramped.Length <= Transcriber.MaxPromptChars
+                && cramped.EndsWith('.')
+                && cramped.Contains("Preferred spellings:")
+                && withoutPrevious == variant + " Possible spoken forms: armor forger. Preferred spellings: Arma Reforger."
+                // The --selftest vectors, unchanged by the new parameter.
+                && Transcriber.BuildPrompt(null, new[] { "Arma Reforger" }, new[] { "armor forger" })
+                    == "Possible spoken forms: armor forger. Preferred spellings: Arma Reforger."
+                && Transcriber.BuildPrompt(null, Array.Empty<string>()) == null
+                && Transcriber.BuildPrompt(null, Array.Empty<string>(), null, "too short") == null;
+            allOk &= promptOk;
+            log.AppendLine($"prompt+previous {(promptOk ? "PASS" : "FAIL")}: context({context.Length})='{context}'");
+            log.AppendLine($"  with previous ({withPrevious.Length}): {withPrevious}");
+            log.AppendLine($"  cramped ({cramped.Length}) ends: …{cramped[^Math.Min(60, cramped.Length)..]}");
+
+            // --- Echo guard sees the previous text (pure) ---
+            var echoed = HallucinationFilter.Apply(
+                "We moved the billing service over on Tuesday, and so far the error rate has stayed flat. Next we test the workers.",
+                variant + " " + context);
+            var echoOk = !echoed.Contains("billing") && echoed.Contains("Next we test the workers.");
+            allOk &= echoOk;
+            log.AppendLine($"echo of previous text {(echoOk ? "PASS" : "FAIL")}: '{echoed}'");
+
+            // --- Recorder measurement helpers (pure) ---
+            long zeroRun = 0;
+            double firedAt = -1;
+            for (var b = 0; b < 140; b++)                 // 50 ms buffers: 0.5 s of signal, then zeros
+            {
+                zeroRun = AudioRecorder.ExtendZeroRun(zeroRun, 800, b < 10 ? 0 : 800);
+                if (firedAt < 0 && zeroRun >= (long)(AudioRecorder.SilentInputThreshold.TotalSeconds * 16000)) firedAt = (b + 1) * 0.05;
+            }
+            var partialRun = AudioRecorder.ExtendZeroRun(12345, 800, 300);   // signal then 300 zeros
+            float floorDb = float.MaxValue;
+            var l1 = AudioRecorder.NormalizeLevel(-200f, ref floorDb);
+            var floorAfterZero = floorDb;
+            var l2 = AudioRecorder.NormalizeLevel(-50f, ref floorDb);
+            var l3 = AudioRecorder.NormalizeLevel(-20f, ref floorDb);
+            float quietFloor = float.MaxValue;
+            AudioRecorder.NormalizeLevel(-48f, ref quietFloor);
+            var l4 = AudioRecorder.NormalizeLevel(-38f, ref quietFloor);
+            var recorderOk = Math.Abs(firedAt - 5.5) < 1e-9 && partialRun == 300
+                && l1 == 0f && floorAfterZero == AudioRecorder.LevelFloorClampDb
+                && Math.Abs(l2 - 0.5f) < 1e-6 && l3 == 1f && Math.Abs(l4 - 0.5f) < 1e-6
+                && Math.Abs(AudioRecorder.RmsDbfs(0, 800) - -200f) < 1e-3
+                && Math.Abs(AudioRecorder.RmsDbfs(800.0 * 32768 * 32768, 800)) < 1e-3;
+            allOk &= recorderOk;
+            log.AppendLine($"recorder helpers {(recorderOk ? "PASS" : "FAIL")}: dead-mic fired at {firedAt:0.00}s " +
+                $"(expect 5.50), partial run={partialRun}, levels={l1}/{l2:0.00}/{l3}/{l4:0.00} floor={floorAfterZero}");
+
+            // --- Cut policy on synthetic takes (pure, deterministic) ---
+            // A 200 Hz tone whose loudness swings like syllables but never
+            // drops into a pause, optionally with silent gaps every 6 s.
+            static float[] Take(double seconds, double gapSeconds, int seed = 0, bool roomTone = false)
+            {
+                var rng = new Random(seed);
+                var n = (int)(seconds * 16000);
+                var x = new float[n];
+                for (var i = 0; i < n; i++)
+                {
+                    var t = i / 16000.0;
+                    if (roomTone) { x[i] = (float)(rng.NextDouble() - 0.5) * 0.002f; continue; }
+                    var inGap = gapSeconds > 0 && t % 6.0 < gapSeconds && t > 1;
+                    x[i] = inGap ? 0f : (float)((0.2 + 0.1 * Math.Sin(2 * Math.PI * 4 * t)) * Math.Sin(2 * Math.PI * 200 * t));
+                }
+                return x;
+            }
+            bool InGap(double t, double gap) => t % 6.0 <= gap + 0.02;
+            var continuous = LiveTranscriber.PlanChunks(Take(62, 0));
+            var paused = LiveTranscriber.PlanChunks(Take(62, 0.7));
+            var commas = LiveTranscriber.PlanChunks(Take(62, 0.45));
+            var shortPlan = LiveTranscriber.PlanChunks(Take(19.9, 0));
+            var roomTone = LiveTranscriber.PlanChunks(Take(62, 0, seed: 1, roomTone: true));
+            string Describe(IReadOnlyList<LiveTranscriber.ChunkStat> plan) => plan.Count == 0 ? "whole-file" :
+                string.Join(" ", plan.Select(c => $"[{c.StartSeconds:0.0}-{c.EndSeconds:0.0}{(c.Forced ? " F" : "")}{(c.Silent ? " S" : "")}]"));
+            bool Lengths(IReadOnlyList<LiveTranscriber.ChunkStat> plan) => plan.Where(c => !c.Final)
+                .All(c => c.EndSeconds - c.StartSeconds >= 15 && c.EndSeconds - c.StartSeconds <= 28.11);
+            var planOk =
+                continuous.Count >= 3 && continuous.Where(c => !c.Final).All(c => c.Forced) && Lengths(continuous)
+                && paused.Count >= 3 && paused.All(c => !c.Forced) && Lengths(paused)
+                && paused.Where(c => !c.Final).All(c => InGap(c.EndSeconds, 0.7))
+                && paused.Where(c => !c.Final).All(c => c.EndSeconds - c.StartSeconds <= 20.01)
+                && commas.Count >= 3 && commas.All(c => !c.Forced) && Lengths(commas)
+                && commas.Where(c => !c.Final).All(c => InGap(c.EndSeconds, 0.45))
+                && shortPlan.Count == 0
+                && roomTone.Count >= 3 && roomTone.All(c => c.Silent);
+            allOk &= planOk;
+            log.AppendLine($"cut policy {(planOk ? "PASS" : "FAIL")}:");
+            log.AppendLine($"  continuous: {Describe(continuous)}");
+            log.AppendLine($"  0.7 s pauses: {Describe(paused)}");
+            log.AppendLine($"  0.45 s pauses: {Describe(commas)}");
+            log.AppendLine($"  19.9 s: {Describe(shortPlan)}");
+            log.AppendLine($"  room tone: {Describe(roomTone)}");
+
+            // --- Real capture (opt-in): SamplesCaptured is exactly the WAV ---
+            if (args.Contains("--mic"))
+            {
+                var captured = new List<short>();
+                var normalizedEvents = 0;
+                void OnSamples(short[] buffer) { lock (captured) captured.AddRange(buffer); }
+                void OnNormalized(float _) => Interlocked.Increment(ref normalizedEvents);
+                var faultsBefore = AudioRecorder.Instance.CallbackFaults;
+                AudioRecorder.Instance.SamplesCaptured += OnSamples;
+                AudioRecorder.Instance.LevelNormalized += OnNormalized;
+                try
+                {
+                    // Monitor first, then record: the old recorder let the
+                    // monitor's late RecordingStopped tear the new take down.
+                    AudioRecorder.Instance.StartMonitor();
+                    await Task.Delay(400);
+                    var monitorSamples = captured.Count;
+                    AudioRecorder.Instance.StartRecording();
+                    await Task.Delay(1500);
+                    var take = await AudioRecorder.Instance.StopAsync().WaitAsync(TimeSpan.FromSeconds(8));
+                    var wav = take == null ? Array.Empty<float>() : Transcriber.ReadSamples(take.Value.Path);
+                    short[] got;
+                    lock (captured) got = captured.ToArray();
+                    var identical = got.Length == wav.Length
+                        && got.Select((v, i) => v / 32768f == wav[i]).All(x => x);
+                    var faults = AudioRecorder.Instance.CallbackFaults - faultsBefore;
+                    var micOk = take != null && monitorSamples == 0 && identical && wav.Length > 16000
+                        && faults == 0 && normalizedEvents > 0;
+                    allOk &= micOk;
+                    log.AppendLine($"mic capture {(micOk ? "PASS" : "FAIL")}: take={(take == null ? "null" : $"{take.Value.DurationSeconds:0.00}s {take.Value.Outcome}")} " +
+                        $"wav={wav.Length} captured={got.Length} identical={identical} " +
+                        $"samplesWhileMonitoring={monitorSamples} normalizedEvents={normalizedEvents} faults={faults}");
+                    AudioRecorder.TryDelete(take?.Path);
+                }
+                finally
+                {
+                    AudioRecorder.Instance.SamplesCaptured -= OnSamples;
+                    AudioRecorder.Instance.LevelNormalized -= OnNormalized;
+                    AudioRecorder.Instance.StopMonitor();
+                }
+            }
+
+            // --- Live vs whole-file on real audio ---
+            var clips = Directory.Exists(target)
+                ? Directory.GetFiles(target, "*.wav").OrderBy(f => f, StringComparer.OrdinalIgnoreCase).ToArray()
+                : File.Exists(target) ? new[] { target } : Array.Empty<string>();
+            if (clips.Length == 0)
+            {
+                log.AppendLine($"no WAVs at '{target}' — model checks skipped");
+            }
+            else
+            {
+                var modelId = Arg("--model");
+                if (string.IsNullOrWhiteSpace(modelId)) modelId = s.SelectedModel;
+                var loadSw = System.Diagnostics.Stopwatch.StartNew();
+                await Transcriber.Instance.LoadModelAsync(modelId);
+                log.AppendLine();
+                log.AppendLine($"model {modelId} loaded in {loadSw.ElapsedMilliseconds} ms on {Transcriber.Instance.RuntimeLabel}");
+
+                // Esc while chunks are decoding: the run must stop promptly,
+                // throw OperationCanceledException, and leave the decoder free.
+                {
+                    var longest = clips.OrderByDescending(c => new FileInfo(c).Length).First();
+                    using var cancelCts = new CancellationTokenSource(1500);
+                    var cancelSw = System.Diagnostics.Stopwatch.StartNew();
+                    var threw = false;
+                    try
+                    {
+                        await LiveTranscriber.SimulateDetailedAsync(longest, s.Language, Array.Empty<string>(), null, null, cancelCts.Token);
+                    }
+                    catch (OperationCanceledException) { threw = true; }
+                    var cancelMs = cancelSw.ElapsedMilliseconds;
+                    var afterSw = System.Diagnostics.Stopwatch.StartNew();
+                    var after = await Transcriber.Instance.TranscribeAsync(clips.OrderBy(c => new FileInfo(c).Length).First(),
+                        s.Language, Array.Empty<string>()).WaitAsync(TimeSpan.FromSeconds(30));
+                    var cancelOk = threw && cancelMs < 1500 + 3000 && !after.IsEmpty;
+                    allOk &= cancelOk;
+                    log.AppendLine($"cancel mid-take {(cancelOk ? "PASS" : "FAIL")}: threw={threw} after {cancelMs} ms (token at 1500 ms); " +
+                        $"next decode {afterSw.ElapsedMilliseconds} ms, text={(after.IsEmpty ? "EMPTY" : "ok")}");
+                }
+
+                foreach (var clip in clips)
+                {
+                    var name = Path.GetFileName(clip);
+                    var txt = Path.ChangeExtension(clip, ".txt");
+                    var reference = File.Exists(txt) ? File.ReadAllText(txt) : null;
+                    var seconds = Transcriber.ReadSamples(clip).Length / 16000.0;
+
+                    var wholeSw = System.Diagnostics.Stopwatch.StartNew();
+                    var whole = await Transcriber.Instance.TranscribeAsync(clip, s.Language, Array.Empty<string>());
+                    wholeSw.Stop();
+
+                    // Evidence for the integrator: does the primer rescue an
+                    // unpunctuated whole-file result too?
+                    string? wholeRetry = null;
+                    long wholeRetryMs = 0;
+                    if (Transcriber.LooksUnpunctuated(whole.Text))
+                    {
+                        var retrySw = System.Diagnostics.Stopwatch.StartNew();
+                        var again = await Transcriber.Instance.TranscribeAsync(clip, s.Language, Array.Empty<string>(),
+                            previousText: Transcriber.PunctuationPrimer);
+                        wholeRetryMs = retrySw.ElapsedMilliseconds;
+                        wholeRetry = again.Text;
+                    }
+
+                    var report = await LiveTranscriber.SimulateDetailedAsync(
+                        clip, s.Language, Array.Empty<string>(), null, null, default);
+
+                    log.AppendLine();
+                    log.AppendLine($"== {name}: {seconds:0.0} s, whole-file decode {wholeSw.ElapsedMilliseconds} ms, verdict {whole.Verdict}");
+                    if (report.Result is not { } live)
+                    {
+                        var shortOk = seconds < LiveTranscriber.SearchAfter.TotalSeconds + 8;
+                        allOk &= shortOk;
+                        log.AppendLine($"   live: not chunked -> caller uses the whole-file path " +
+                            $"(identical output by construction) {(shortOk ? "PASS" : "FAIL: a long take was not chunked")}");
+                        continue;
+                    }
+
+                    var stats = report.Chunks;
+                    foreach (var c in stats)
+                    {
+                        log.AppendLine($"   chunk {c.Index}: {c.StartSeconds,6:0.00}-{c.EndSeconds,6:0.00} s " +
+                            $"({c.EndSeconds - c.StartSeconds,5:0.0} s) {(c.Final ? "tail  " : c.Forced ? "forced" : "pause ")} " +
+                            $"pauseAfter={c.PauseAfterSeconds:0.00}s gain={c.Gain:0.00} decode={c.DecodeMs} ms" +
+                            (c.Silent ? " SILENT(skipped)" : "") + (c.Retried ? " RETRIED(unpunctuated)" : ""));
+                    }
+                    var nonTail = stats.Where(c => !c.Final).ToList();
+                    var lastCut = nonTail.LastOrDefault();
+                    // Worst realistic case: release lands just after the last
+                    // cut, so its decode is still running when the tail starts.
+                    var worst = report.ReleaseToTextMs + (lastCut?.DecodeMs ?? 0);
+                    var keptUp = nonTail.Zip(stats.Skip(1), (c, next) => c.DecodeMs < (next.EndSeconds - next.StartSeconds) * 1000).All(x => x);
+                    log.AppendLine($"   live: {stats.Count} chunks, release->text {report.ReleaseToTextMs} ms " +
+                        $"(worst case incl. last chunk still decoding: {worst} ms) vs whole-file {wholeSw.ElapsedMilliseconds} ms; " +
+                        $"decoder kept up with real time: {keptUp}");
+                    log.AppendLine($"   conditioning: final-chunk gain {report.FinalChunkGain:0.000} vs whole-file {report.WholeFileGain:0.000}, " +
+                        $"streamed high-pass max delta {report.FilterMaxDelta:E2}");
+                    var verdictOk = live.Verdict == whole.Verdict
+                        && Math.Abs(report.FinalChunkGain - report.WholeFileGain) < 1e-4
+                        && report.FilterMaxDelta < 1e-6;
+                    allOk &= verdictOk;
+                    log.AppendLine($"   verdict/gain/filter parity {(verdictOk ? "PASS" : "FAIL")}: live {live.Verdict} whole {whole.Verdict}");
+                    if (reference != null)
+                    {
+                        var (le, ln) = WordErrorRate.Count(reference, live.Text);
+                        var (we, wn) = WordErrorRate.Count(reference, whole.Text);
+                        log.AppendLine($"   WER vs reference: live {100.0 * le / Math.Max(1, ln):0.0}% ({le}/{ln})  " +
+                            $"whole-file {100.0 * we / Math.Max(1, wn):0.0}% ({we}/{wn})");
+                    }
+                    if (wholeRetry != null)
+                    {
+                        var (re, rn) = reference != null ? WordErrorRate.Count(reference, wholeRetry) : (0, 0);
+                        log.AppendLine($"   whole-file came back UNPUNCTUATED; primed retry {wholeRetryMs} ms -> sentence marks " +
+                            $"{wholeRetry.Count(ch => ch is '.' or '!' or '?')}, WER {100.0 * re / Math.Max(1, rn):0.0}%");
+                    }
+                    var (de, dn) = WordErrorRate.Count(whole.Text, live.Text);
+                    log.AppendLine($"   sentence marks: live {live.Text.Count(ch => ch is '.' or '!' or '?')}, whole-file {whole.Text.Count(ch => ch is '.' or '!' or '?')}");
+                    log.AppendLine($"   live vs whole-file word difference: {100.0 * de / Math.Max(1, dn):0.0}% ({de}/{dn})");
+                    log.AppendLine($"   live : {live.Text.Replace(SmartFormatter.ParagraphMark, '¶')}");
+                    log.AppendLine($"   whole: {whole.Text.Replace(SmartFormatter.ParagraphMark, '¶')}");
+                }
+            }
+            log.AppendLine();
+            log.AppendLine(allOk ? "LIVECHECK OK" : "LIVECHECK FAILED");
+        }
+        catch (Exception ex)
+        {
+            log.AppendLine($"LIVECHECK FAILED: {ex}");
+        }
+        finally
+        {
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(outPath))!);
+                File.WriteAllText(outPath, log.ToString());
+            }
+            catch { }
+            Shutdown();
+        }
     }
 
     // ----- Key log (hidden diagnostic: FlowType.exe --keylog) -----
@@ -380,6 +964,17 @@ public partial class App : Application
             await Task.Delay(200);
             bar.SnapshotStates(dir);
             bar.AllowClose();
+
+            // "Learn from your writing": every state of the review window,
+            // from a synthetic report (learn-*.png).
+            try
+            {
+                LearnWindow.SnapshotAll(dir);
+            }
+            catch (Exception ex)
+            {
+                File.WriteAllText(Path.Combine(dir, "learn-error.txt"), ex.ToString());
+            }
 
             try
             {
@@ -1172,6 +1767,12 @@ public partial class App : Application
                 ("I need to fix the armour on that vehicle.", "I need to fix the armour on that vehicle."),
                 ("mail me at roy@example.com today", "mail me at roy@example.com today"),
                 ("she reforged the sword at the forge", "she reforged the sword at the forge"),
+                // The word in front of a term is not part of it (2.1 fix: these
+                // used to lose "an" and "a").
+                ("we need an Arma Reforger mod", "we need an Arma Reforger mod"),
+                ("I bought a workbench today", "I bought a Workbench today"),
+                // …but a mishearing split across words is still one term.
+                ("open Arm a Reforger now", "open Arma Reforger now"),
             };
             var vocabPass = 0;
             foreach (var (input, expected) in vocabVectors)
@@ -1448,7 +2049,140 @@ public partial class App : Application
             log.AppendLine($"prompt {(promptOk ? "PASS" : "FAIL")}: {builtPrompt.Length} chars " +
                 $"(cap {Transcriber.MaxPromptChars}); short='{shortPrompt}'");
 
+            // ----- Live transcription + recorder measurement (pure; no model, no mic) -----
+            // Paste into RunSelfTest beside the existing "prompt" vectors, then AND
+            // `liveOk` into allPassed. Same checks as --livecheck's pure section.
+
+            // previousText goes after the variant sentence, before both dictionary
+            // sections; without it the prompt is unchanged.
+            var liveVariant = EnglishVariant.RecognitionPrompt(EnglishVariant.Us) ?? "";
+            var livePrevious = "and that is why the migration slipped by a week. " + SmartFormatter.ParagraphMark
+                + " We moved the billing service over on Tuesday, and so far the error rate has stayed flat in every region.";
+            var livePrompt = Transcriber.BuildPrompt(liveVariant, new[] { "Arma Reforger" }, new[] { "armor forger" }, livePrevious) ?? "";
+            var liveContext = Transcriber.PreviousContext(livePrevious, Transcriber.MaxPreviousTextChars) ?? "";
+            var livePromptOk =
+                livePrompt.StartsWith(liveVariant, StringComparison.Ordinal)
+                && livePrompt.EndsWith("Preferred spellings: Arma Reforger.", StringComparison.Ordinal)
+                && livePrompt.IndexOf("stayed flat", StringComparison.Ordinal)
+                    < livePrompt.IndexOf("Possible spoken forms:", StringComparison.Ordinal)
+                && !livePrompt.Contains(SmartFormatter.ParagraphMark)
+                && livePrompt.Length <= Transcriber.MaxPromptChars
+                && (Transcriber.BuildPrompt(liveVariant, Enumerable.Range(0, 200).Select(i => $"Term{i:000}").ToArray(),
+                        new[] { "spoken one" }, livePrevious) ?? "").Length <= Transcriber.MaxPromptChars
+                && Transcriber.BuildPrompt(null, Array.Empty<string>(), null, "too short") == null;
+
+            // An echo of the previous chunk's text is stripped like a prompt echo.
+            var liveEchoOk = HallucinationFilter.Apply(
+                    "We moved the billing service over on Tuesday, and so far the error rate has stayed flat. Next we test the workers.",
+                    liveVariant + " " + liveContext)
+                == "Next we test the workers.";
+
+            // Unpunctuated-mode detector.
+            var livePunctOk = Transcriber.LooksUnpunctuated(
+                    "hey team i wanted to give a quick update on where the migration stands before tomorrow's meeting we moved")
+                && !Transcriber.LooksUnpunctuated("Hey team, I wanted to give a quick update. We moved the billing service over.")
+                && !Transcriber.LooksUnpunctuated("ok sounds good see you then");
+
+            // Dead-mic run (exact zeros) and the normalized meter.
+            long zeroRun = 0;
+            double firedAt = -1;
+            for (var b = 0; b < 140; b++)   // 50 ms buffers: 0.5 s of signal, then zeros
+            {
+                zeroRun = AudioRecorder.ExtendZeroRun(zeroRun, 800, b < 10 ? 0 : 800);
+                if (firedAt < 0 && zeroRun >= (long)(AudioRecorder.SilentInputThreshold.TotalSeconds * 16000)) firedAt = (b + 1) * 0.05;
+            }
+            float meterFloor = float.MaxValue;
+            var m0 = AudioRecorder.NormalizeLevel(-200f, ref meterFloor);   // floor clamps to -60
+            var m1 = AudioRecorder.NormalizeLevel(-50f, ref meterFloor);    // 10 dB above floor -> 0.5
+            var m2 = AudioRecorder.NormalizeLevel(-20f, ref meterFloor);    // 40 dB above -> clamps to 1
+            var liveRecorderOk = Math.Abs(firedAt - 5.5) < 1e-9
+                && AudioRecorder.ExtendZeroRun(12345, 800, 300) == 300
+                && m0 == 0f && meterFloor == AudioRecorder.LevelFloorClampDb
+                && Math.Abs(m1 - 0.5f) < 1e-6 && m2 == 1f
+                && AudioRecorder.SilentInputDue(5 * 16000, sawNonZero: false)
+                && !AudioRecorder.SilentInputDue(5 * 16000, sawNonZero: true)
+                && !AudioRecorder.SilentInputDue(29 * 16000, sawNonZero: true)
+                && AudioRecorder.SilentInputDue(30 * 16000, sawNonZero: true);
+
+            // Cut policy on synthetic takes: a 200 Hz tone whose loudness swings
+            // like syllables but never pauses, optionally with silent gaps every 6 s.
+            static float[] LiveTake(double seconds, double gap, bool roomTone = false)
+            {
+                var rng = new Random(1);
+                var x = new float[(int)(seconds * 16000)];
+                for (var i = 0; i < x.Length; i++)
+                {
+                    var t = i / 16000.0;
+                    if (roomTone) { x[i] = (float)(rng.NextDouble() - 0.5) * 0.002f; continue; }
+                    x[i] = gap > 0 && t > 1 && t % 6.0 < gap ? 0f
+                        : (float)((0.2 + 0.1 * Math.Sin(2 * Math.PI * 4 * t)) * Math.Sin(2 * Math.PI * 200 * t));
+                }
+                return x;
+            }
+            var planContinuous = LiveTranscriber.PlanChunks(LiveTake(62, 0));
+            var planPaused = LiveTranscriber.PlanChunks(LiveTake(62, 0.7));
+            var planCommas = LiveTranscriber.PlanChunks(LiveTake(62, 0.45));
+            var planShort = LiveTranscriber.PlanChunks(LiveTake(19.9, 0));
+            var planRoom = LiveTranscriber.PlanChunks(LiveTake(62, 0, roomTone: true));
+            bool PlanLengths(IReadOnlyList<LiveTranscriber.ChunkStat> plan) => plan.Where(c => !c.Final)
+                .All(c => c.EndSeconds - c.StartSeconds >= 15 && c.EndSeconds - c.StartSeconds <= 28.11);
+            var livePlanOk =
+                planContinuous.Count >= 3 && planContinuous.Where(c => !c.Final).All(c => c.Forced) && PlanLengths(planContinuous)
+                && planPaused.Count >= 3 && planPaused.All(c => !c.Forced) && PlanLengths(planPaused)
+                && planPaused.Where(c => !c.Final).All(c => c.EndSeconds % 6.0 <= 0.72)
+                && planCommas.Count >= 3 && planCommas.All(c => !c.Forced) && PlanLengths(planCommas)
+                && planCommas.Where(c => !c.Final).All(c => c.EndSeconds % 6.0 <= 0.47)
+                && planShort.Count == 0
+                && planRoom.Count >= 3 && planRoom.All(c => c.Silent);
+
+            var liveOk = livePromptOk && liveEchoOk && livePunctOk && liveRecorderOk && livePlanOk;
+            log.AppendLine($"live transcription {(liveOk ? "PASS" : "FAIL")}: prompt={livePromptOk} echo={liveEchoOk} " +
+                $"unpunctuated={livePunctOk} recorder={liveRecorderOk} cuts={livePlanOk} " +
+                $"(cuts on 0.7 s pauses: {string.Join(" ", planPaused.Select(c => $"{c.EndSeconds:0.0}"))})");
+
+            // ----- 2.0 components -----
+            var v2Ok = Diagnostics.V2SelfTest.Run(log);
+
+            var contextTerms = ContextTerms.SelfTest();
+            foreach (var line in contextTerms.Lines) log.AppendLine("terms " + line);
+            log.AppendLine($"context terms: {contextTerms.Passed}/{contextTerms.Total} passed");
+
+            var edits = EditLearner.SelfTest();
+            foreach (var line in edits.Lines) log.AppendLine("edits " + line);
+            log.AppendLine($"edit learning: {edits.Passed}/{edits.Total} passed");
+
+            // Read-only: lists the audio sessions MediaMuter would silence.
+            foreach (var line in MediaMuter.DescribeSessions().Take(12)) log.AppendLine("media: " + line);
+            var waveInOk =
+                AudioDeviceWatcher.MatchWaveInName("Headset Microphone (DualSense Wireless Controller)",
+                    new[] { "Headset Microphone (DualSense W" }) == "Headset Microphone (DualSense W"
+                && AudioDeviceWatcher.MatchWaveInName("Microphone (2- USB Audio Device)",
+                    new[] { "Microphone" }) == "Microphone (2- USB Audio Device"
+                && AudioDeviceWatcher.MatchWaveInName("Mic (Short)", new[] { "Mic (Short)", "Mic" }) == "Mic (Short)";
+            log.AppendLine($"waveIn name mapping {(waveInOk ? "PASS" : "FAIL")}");
+            foreach (var f in AudioDeviceWatcher.ActiveCaptureDevices())
+            {
+                log.AppendLine($"mic: {f} -> waveIn '{AudioDeviceWatcher.WaveInNameFor(f)}'");
+            }
+
+            var barResults = FlowType.UI.Bar.BarSelfTest.Run();
+            foreach (var (name, ok, detail) in barResults)
+            {
+                log.AppendLine($"bar: {(ok ? "PASS" : "FAIL")} {name} [{detail}]");
+            }
+            var barOk = barResults.All(r => r.Ok);
+
+            var llmOk = Environment.GetCommandLineArgs().Contains("--fast")
+                || await Diagnostics.V2SelfTest.LlmSmokeAsync(log);
+
             var allPassed = pass == vectors.Length
+                && v2Ok
+                && contextTerms.Passed == contextTerms.Total
+                && edits.Passed == edits.Total
+                && waveInOk
+                && barOk
+                && liveOk
+                && llmOk
                 && variantPass == variantVectors.Length
                 && guardPass == guardVectors.Length
                 && vocabPass == vocabVectors.Length

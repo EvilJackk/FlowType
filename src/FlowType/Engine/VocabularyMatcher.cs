@@ -118,34 +118,25 @@ public static class VocabularyMatcher
         if (words.Length == 0) return line;
 
         var result = new List<string>(words.Length);
+        var runKeys = new string?[MaxNgram];
         var i = 0;
         while (i < words.Length)
         {
-            string? bestTerm = null;
-            var bestScore = double.MaxValue;
-            var bestSpan = 0;
+            var (bestTerm, bestScore, bestSpan) = BestAt(words, i, terms, keys, threshold, runKeys);
 
-            // Longest first would let "Charge B, che" swallow the following
-            // word when both share a Soundex code, so every width is scored and
-            // the closest wins.
-            for (var n = MaxNgram; n >= 1; n--)
+            // A multi-word run must not swallow the word in front of the term.
+            // "an Arma Reforger" is within the threshold of "Arma Reforger"
+            // (two extra letters in fourteen), and because runs are scored from
+            // where they start, "an" used to vanish: "we need an Arma Reforger
+            // mod" came out as "we need Arma Reforger mod", and "I bought a
+            // workbench" as "I bought Workbench". When the run starting one word
+            // later matches at least as well, the first word is ordinary text;
+            // the next position takes the match. A genuinely split mishearing
+            // ("get hub" → GitHub, "Arm a Reforger") has no such shorter run.
+            if (bestTerm != null && bestSpan >= 2 && i + 1 < words.Length
+                && BestAt(words, i + 1, terms, keys, threshold, runKeys).Score <= bestScore)
             {
-                if (i + n > words.Length) continue;
-                // A comma or full stop closes the candidate: "Charge B, che" is
-                // two things, not one.
-                if (SpansPunctuation(words, i, n)) continue;
-                // An address or URL is a single opaque thing; rewriting a piece
-                // of it is always wrong.
-                if (SpansProtectedToken(words, i, n)) continue;
-
-                var candidate = BuildKey(words, i, n);
-                var match = FindBest(candidate, terms, keys, threshold);
-                if (match != null && match.Value.Score < bestScore)
-                {
-                    bestTerm = match.Value.Term;
-                    bestScore = match.Value.Score;
-                    bestSpan = n;
-                }
+                bestTerm = null;
             }
 
             if (bestTerm != null)
@@ -162,6 +153,261 @@ public static class VocabularyMatcher
             }
         }
         return string.Join(" ", result);
+    }
+
+    /// <summary>
+    /// The closest match among the runs starting at word <paramref name="i"/>
+    /// (term, score, width in words), or a null term. Every width is scored
+    /// and the closest wins: longest-first would let "Charge B, che" swallow
+    /// the following word when both share a Soundex code.
+    /// <paramref name="runKeys"/> is scratch space.
+    /// </summary>
+    private static (string? Term, double Score, int Span) BestAt(string[] words, int i,
+        IReadOnlyList<string> terms, List<TermKey> keys, double threshold, string?[] runKeys)
+    {
+        string? bestTerm = null;
+        var bestScore = double.MaxValue;
+        var bestSpan = 0;
+        RunKeysAt(words, i, runKeys);
+        for (var n = MaxNgram; n >= 1; n--)
+        {
+            var candidate = runKeys[n - 1];
+            if (candidate == null) continue;
+            var match = FindBest(candidate, terms, keys, threshold);
+            if (match != null && match.Value.Score < bestScore)
+            {
+                bestTerm = match.Value.Term;
+                bestScore = match.Value.Score;
+                bestSpan = n;
+            }
+        }
+        return (bestTerm, bestScore, bestSpan);
+    }
+
+    /// <summary>
+    /// The keys of the 1…<see cref="MaxNgram"/>-word runs that start at word
+    /// <paramref name="i"/>, as <see cref="ApplyToLine"/> scores them:
+    /// <paramref name="into"/>[n − 1] is the n-word run, or null where that run
+    /// is never considered. Shared with <see cref="RunIndex"/> so the
+    /// "would this term rewrite anything?" check can never drift from what
+    /// Apply really does.
+    /// </summary>
+    private static void RunKeysAt(string[] words, int i, string?[] into)
+    {
+        for (var n = 1; n <= MaxNgram; n++)
+        {
+            into[n - 1] = null;
+            if (i + n > words.Length) continue;
+            // A comma or full stop closes the candidate: "Charge B, che" is
+            // two things, not one.
+            if (SpansPunctuation(words, i, n)) continue;
+            // An address or URL is a single opaque thing; rewriting a piece
+            // of it is always wrong.
+            if (SpansProtectedToken(words, i, n)) continue;
+            into[n - 1] = BuildKey(words, i, n);
+        }
+    }
+
+    // ----- collision check (for "Learn from your writing") -----
+
+    /// <summary>
+    /// Whether adding <paramref name="term"/> as a vocabulary word would make
+    /// <see cref="Apply"/> rewrite something in <paramref name="text"/> — a run
+    /// that is not simply the term itself in other capitals or spacing
+    /// ("wispr", "Wis pr" for "Wispr" are fine; "whisper", "army" for "Arma",
+    /// "prefabs" for "prefab" are not).
+    ///
+    /// A learned word is a fuzzy-match target on every later dictation, so a
+    /// word the user really writes that sits within the threshold of it is
+    /// silently rewritten from then on. "Learn from your writing" asks this
+    /// before it pre-ticks a word. Pure; nothing is rewritten. Every place in
+    /// the text is checked, including ones an earlier match would have
+    /// consumed, so it can only err towards "yes".
+    /// </summary>
+    internal static bool WouldRewrite(string text, string term) =>
+        RunIndex.Build(new[] { text }).PlacesRewrittenBy(term).Count > 0;
+
+    /// <summary>
+    /// Every place in a body of text where <see cref="Apply"/> would try a
+    /// match, reduced to the keys it would score there. Built once over the
+    /// user's history so many candidate terms can be checked against it
+    /// cheaply: each distinct run key is scored once per term, and each
+    /// distinct place (the keys of its 1-, 2- and 3-word runs) is decided once.
+    /// The decision is <see cref="ApplyToLine"/>'s — same runs, same
+    /// <see cref="FindBest"/>, same "closest width wins".
+    /// </summary>
+    internal sealed class RunIndex
+    {
+        private readonly List<string> _keys = new();
+        private readonly Dictionary<string, int> _keyIds = new(StringComparer.Ordinal);
+
+        /// <summary>Letter counts per key (same index as <see cref="_keys"/>), for the edit-distance bound.</summary>
+        private readonly List<byte[]> _counts = new();
+
+        /// <summary>Key ids by key length, so a term only scores keys its length guard could pass.</summary>
+        private readonly Dictionary<int, List<int>> _idsByLength = new();
+
+        /// <summary>
+        /// Distinct places: index into <see cref="_keys"/> per run width (1, 2,
+        /// 3 words) at this word, then the same for the next word (Apply's
+        /// "don't swallow the word before the term" look-ahead); −1 where none.
+        /// </summary>
+        private readonly List<int[]> _places = new();
+
+        private RunIndex() { }
+
+        public static RunIndex Build(IEnumerable<string> texts)
+        {
+            var index = new RunIndex();
+            var seen = new HashSet<(int, int, int, int, int, int)>();
+            var runKeys = new string?[MaxNgram];
+            var nextKeys = new string?[MaxNgram];
+            foreach (var text in texts)
+            {
+                if (string.IsNullOrEmpty(text)) continue;
+                foreach (var line in text.Split('\n'))
+                {
+                    var words = line.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+                    for (var i = 0; i < words.Length; i++)
+                    {
+                        RunKeysAt(words, i, runKeys);
+                        var here = (index.IdOf(runKeys[0]), index.IdOf(runKeys[1]), index.IdOf(runKeys[2]));
+                        if (here is (< 0, < 0, < 0)) continue;
+                        if (i + 1 < words.Length) RunKeysAt(words, i + 1, nextKeys);
+                        else Array.Fill(nextKeys, null);
+                        var place = (here.Item1, here.Item2, here.Item3,
+                            index.IdOf(nextKeys[0]), index.IdOf(nextKeys[1]), index.IdOf(nextKeys[2]));
+                        if (!seen.Add(place)) continue;
+                        index._places.Add(new[] { place.Item1, place.Item2, place.Item3, place.Item4, place.Item5, place.Item6 });
+                    }
+                }
+            }
+            return index;
+        }
+
+        /// <summary>A key FindBest could ever match gets an id; anything else is −1.</summary>
+        private int IdOf(string? key)
+        {
+            if (key == null || !IsSupportedKey(key) || key.Length > MaxCandidateLength) return -1;
+            if (_keyIds.TryGetValue(key, out var id)) return id;
+            id = _keys.Count;
+            _keys.Add(key);
+            _counts.Add(LetterCounts(key));
+            _keyIds[key] = id;
+            if (!_idsByLength.TryGetValue(key.Length, out var sameLength)) _idsByLength[key.Length] = sameLength = new List<int>();
+            sameLength.Add(id);
+            return id;
+        }
+
+        /// <summary>
+        /// The places where <c>Apply(text, [term])</c> would replace a run that
+        /// is not the term itself (same <see cref="MatchKey"/>), as indices for
+        /// <see cref="IsProtected"/>.
+        /// </summary>
+        public IReadOnlyList<int> PlacesRewrittenBy(string term)
+        {
+            var termKeys = new List<TermKey>(2);
+            AddKeys(termKeys, term, 0);
+            if (termKeys.Count == 0 || _places.Count == 0) return Array.Empty<int>();
+
+            var own = MatchKey(term);
+            var terms = new[] { term };
+            // Two cheap tests skip most keys before FindBest's edit distance.
+            // Both are loose on purpose: whatever passes, FindBest decides.
+            // 1. A copy of its length guard (plus one).
+            // 2. Letter counts: a substitution changes the count difference by
+            //    at most 2 and an insert or delete by 1, so the edit distance is
+            //    at least half of it. No match is possible once that bound is
+            //    past the phonetic cap — the most any match may differ.
+            var termCounts = termKeys.Select(t => (t.Key.Length, Counts: LetterCounts(t.Key))).ToList();
+            var maxRatio = Math.Max(DefaultThreshold, MaxPhoneticEditRatio);
+            var scores = new double[_keys.Count];
+            Array.Fill(scores, double.MaxValue);
+            foreach (var (length, ids) in _idsByLength)
+            {
+                if (!termCounts.Any(t => Math.Abs(length - t.Length) <= Math.Max(Math.Max(length, t.Length) * 0.25, 2.0) + 1)) continue;
+                foreach (var id in ids)
+                {
+                    var key = _keys[id];
+                    var keyCounts = _counts[id];
+                    var possible = false;
+                    foreach (var (termLength, counts) in termCounts)
+                    {
+                        var difference = 0;
+                        for (var slot = 0; slot < CountSlots; slot++) difference += Math.Abs(counts[slot] - keyCounts[slot]);
+                        if ((difference + 1) / 2 <= maxRatio * Math.Max(key.Length, termLength) + 1e-9)
+                        {
+                            possible = true;
+                            break;
+                        }
+                    }
+                    if (possible) scores[id] = FindBest(key, terms, termKeys, DefaultThreshold)?.Score ?? double.MaxValue;
+                }
+            }
+
+            var hits = new List<int>();
+            for (var p = 0; p < _places.Count; p++)
+            {
+                var ids = _places[p];
+                var (bestId, bestScore, bestWidth) = Best(ids, 0, scores);
+                if (bestId < 0) continue;
+                // ApplyToLine's look-ahead: a multi-word run gives way when the
+                // run one word later matches at least as well.
+                if (bestWidth >= 2 && Best(ids, MaxNgram, scores).Score <= bestScore) continue;
+                if (!string.Equals(_keys[bestId], own, StringComparison.Ordinal)) hits.Add(p);
+            }
+            return hits;
+        }
+
+        /// <summary>
+        /// <see cref="BestAt"/> over precomputed scores: the closest of the three
+        /// widths stored at <paramref name="offset"/> (0 = this word, 3 = the next).
+        /// </summary>
+        private static (int Id, double Score, int Width) Best(int[] ids, int offset, double[] scores)
+        {
+            var bestScore = double.MaxValue;
+            var bestId = -1;
+            var bestWidth = 0;
+            for (var n = MaxNgram; n >= 1; n--)
+            {
+                var id = ids[offset + n - 1];
+                if (id < 0 || scores[id] >= bestScore) continue;
+                bestScore = scores[id];
+                bestId = id;
+                bestWidth = n;
+            }
+            return (bestId, bestScore, bestWidth);
+        }
+
+        /// <summary>Supported keys are a–z and 0–9 only (<see cref="IsSupportedKey"/>).</summary>
+        private const int CountSlots = 36;
+
+        private static int Slot(char c) => c <= '9' ? 26 + (c - '0') : c - 'a';
+
+        /// <summary>How often each letter and digit occurs; keys are at most 50 characters, so a byte holds it.</summary>
+        private static byte[] LetterCounts(string key)
+        {
+            var counts = new byte[CountSlots];
+            foreach (var c in key) counts[Slot(c)]++;
+            return counts;
+        }
+
+        /// <summary>
+        /// Whether a run at <paramref name="place"/> is exactly one of
+        /// <paramref name="exactKeys"/> (<see cref="MatchKey"/> form). Such a run
+        /// matches its own term with a score of 0, which no other term can
+        /// beat, so a term in the same list cannot rewrite it.
+        /// </summary>
+        public bool IsProtected(int place, IReadOnlySet<string> exactKeys)
+        {
+            var ids = _places[place];
+            for (var n = 0; n < MaxNgram; n++)   // this word's runs only, not the look-ahead
+            {
+                var id = ids[n];
+                if (id >= 0 && exactKeys.Contains(_keys[id])) return true;
+            }
+            return false;
+        }
     }
 
     // ----- term keys -----

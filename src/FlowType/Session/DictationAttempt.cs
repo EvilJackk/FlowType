@@ -1,4 +1,4 @@
-using System.IO;
+﻿using System.IO;
 using System.Text.Json;
 using FlowType.Audio;
 using FlowType.Core;
@@ -66,6 +66,20 @@ public sealed class DictationAttempt : IDisposable
     public int WordCount { get; set; }
     public string AppName { get; set; } = "";
 
+    // ----- 2.0: what the newer stages did (still measurements only) -----
+
+    /// <summary>Why AI polish ran or not: "off", "skipped", "ok", "rejected: …", "timed out"…</summary>
+    public string Ai { get; set; } = "";
+    public long AiMs { get; set; }
+    public int LiveChunks { get; set; }
+    public bool ContextKnown { get; set; }
+    public long ContextMs { get; set; }
+    public bool Command { get; set; }
+    public bool Snippet { get; set; }
+
+    /// <summary>Key release to text inserted — the number the user actually feels.</summary>
+    public long LatencyMs { get; set; }
+
     public DictationAttempt()
     {
         _enabled = SettingsStore.Instance.Settings.DiagnosticLog;
@@ -100,6 +114,14 @@ public sealed class DictationAttempt : IDisposable
                 final_len = FinalLength,
                 words = WordCount,
                 app = AppName,
+                ai = Ai,
+                ai_ms = AiMs,
+                live_chunks = LiveChunks,
+                ctx = ContextKnown,
+                ctx_ms = ContextMs,
+                command = Command,
+                snippet = Snippet,
+                latency_ms = LatencyMs,
             }, JsonOptions);
 
             lock (FileGate)

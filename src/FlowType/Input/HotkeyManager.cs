@@ -125,13 +125,32 @@ public sealed class HotkeyManager : IDisposable
     /// </summary>
     public volatile bool SessionActive;
 
+    /// <summary>
+    /// True only while audio is being captured (not while transcribing).
+    /// Space is treated as a gesture key — and kept from the focused app —
+    /// only then.
+    /// </summary>
+    public volatile bool RecordingActive;
+
     /// <summary>Raw hook trace for the --keylog diagnostic; null in normal runs.</summary>
     public Action<string>? Trace;
 
     public event Action? Pressed;
     public event Action? Released;
-    public event Action? OtherKeyPressed;
+
+    /// <summary>
+    /// A non-hotkey key went down while the hotkey is held, with its vk. The
+    /// session decides: Space = go hands-free, Alt = Command Mode, anything
+    /// else = "this was a keyboard shortcut", cancel quietly.
+    /// </summary>
+    public event Action<int>? OtherKeyPressed;
     public event Action? CancelRequested;
+
+    /// <summary>Alt+Shift+Z — paste the last dictation again (Wispr's default too).</summary>
+    public event Action? PasteLastRequested;
+
+    /// <summary>Alt+Shift+X — copy the last dictation to the clipboard.</summary>
+    public event Action? CopyLastRequested;
 
     /// <summary>Every real (non-FlowType) keydown the hook sees — feeds the live key monitor.</summary>
     public event Action<int>? KeyObserved;
@@ -357,18 +376,132 @@ public sealed class HotkeyManager : IDisposable
             SetActive(nowActive);
 
             // Swallow keys that would otherwise act on the focused app
-            // (Caps Lock toggling, F-keys, the Space in Ctrl+Shift+Space).
+            // (Caps Lock toggling, F-keys, the Space in Ctrl+Shift+Space) —
+            // but only as part of the chord. Swallowing on membership alone
+            // ate every Space system-wide for the Ctrl+Shift+Space hotkey.
             if (def.SuppressVk == vk)
             {
-                return new IntPtr(1);
+                if (isDown && (nowActive || _swallowed.Contains(vk)))
+                {
+                    _swallowed.Add(vk);
+                    return new IntPtr(1);
+                }
+                if (isUp && _swallowed.Remove(vk))
+                {
+                    return new IntPtr(1);
+                }
             }
         }
-        else if (isDown && IsHotkeyDown)
+        else if (_swallowed.Contains(vk))
         {
-            Post(OtherKeyPressed);
+            // A key whose down-stroke was swallowed keeps its auto-repeats and
+            // its up-stroke swallowed too, whatever happened in between —
+            // otherwise a take ending while Space is still held would let the
+            // repeats through and leave an up-stroke without its down.
+            if (isUp) _swallowed.Remove(vk);
+            return new IntPtr(1);
+        }
+        else if (IsHotkeyDown)
+        {
+            // While a take is being recorded, Space is part of the gesture
+            // (hands-free): the focused app must not see it, because
+            // Ctrl+Win+Space switches the keyboard layout. Alt (Command Mode)
+            // is NOT swallowed — swallowing it turned Ctrl+Alt+X shortcuts
+            // into Ctrl+X — it is only menu-masked so releasing it does not
+            // open the menu bar.
+            if (isDown && RecordingActive && vk == VkSpace)
+            {
+                _swallowed.Add(vk);
+                var other = OtherKeyPressed;
+                Post(() => other?.Invoke(vk));
+                SendMenuMask();
+                return new IntPtr(1);
+            }
+            if (isDown)
+            {
+                if (RecordingActive && IsAltKey(vk)) SendMenuMask();
+                var other = OtherKeyPressed;
+                Post(() => other?.Invoke(vk));
+            }
+        }
+
+        if (TryHandleLastDictationChord(vk, isDown, isUp))
+        {
+            return new IntPtr(1);
         }
 
         return NativeMethods.CallNextHookEx(_hookHandle, nCode, wParam, lParam);
+    }
+
+    // ----- Gesture keys and the last-dictation chords -----
+
+    private const int VkSpace = 0x20;
+    private const int VkZ = 0x5A;
+    private const int VkX = 0x58;
+
+    /// <summary>
+    /// An unassigned virtual key. Injecting it between a modifier's down and up
+    /// strokes tells Windows "something else was pressed" — the same trick
+    /// AutoHotkey uses (its menu-mask key) — so releasing Alt or Win after a
+    /// swallowed key does not open the menu bar or the Start menu, and Alt+Shift
+    /// is not taken as the switch-keyboard-layout gesture.
+    /// </summary>
+    private const ushort VkMenuMask = 0xE8;
+
+    /// <summary>Keys this hook swallowed on the way down; their up-strokes go too.</summary>
+    private readonly HashSet<int> _swallowed = new();
+
+    private int _pendingChord;
+
+    private static bool IsAltKey(int vk) => vk is 0x12 or 0xA4 or 0xA5;
+
+    private static void SendMenuMask() => NativeMethods.Send(
+        NativeMethods.KeyInput(VkMenuMask, false), NativeMethods.KeyInput(VkMenuMask, true));
+
+    /// <summary>
+    /// Alt+Shift+Z / Alt+Shift+X. The letter is swallowed, and the action fires
+    /// only once Alt and Shift are both up again (plus a beat) — firing while
+    /// they are still held would turn the Ctrl+V we inject into Alt+Shift+Ctrl+V.
+    /// Wispr Flow waits for the release the same way. Runs on the hook thread,
+    /// so the waiting happens on the thread pool, never here.
+    /// </summary>
+    private bool TryHandleLastDictationChord(int vk, bool isDown, bool isUp)
+    {
+        if (vk is not (VkZ or VkX)) return false;
+        if (!isDown || _captureCallback != null) return false;
+        if (!SettingsStore.Instance.Settings.PasteLastShortcut) return false;
+
+        var alt = NativeMethods.IsKeyDown(0x12);
+        var shift = NativeMethods.IsKeyDown(0x10);
+        var ctrl = NativeMethods.IsKeyDown(0x11);
+        var win = NativeMethods.IsKeyDown(0x5B) || NativeMethods.IsKeyDown(0x5C);
+        if (!alt || !shift || ctrl || win) return false;
+
+        _swallowed.Add(vk);
+        SendMenuMask();
+        // Key repeat while held must not queue a second paste.
+        if (Interlocked.CompareExchange(ref _pendingChord, vk, 0) != 0) return true;
+
+        var handler = vk == VkZ ? PasteLastRequested : CopyLastRequested;
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                var deadline = DateTime.UtcNow.AddSeconds(5);
+                while ((NativeMethods.IsKeyDown(0x12) || NativeMethods.IsKeyDown(0x10))
+                       && DateTime.UtcNow < deadline)
+                {
+                    await Task.Delay(15);
+                }
+                await Task.Delay(25);
+                Post(handler);
+            }
+            finally
+            {
+                Interlocked.Exchange(ref _pendingChord, 0);
+            }
+        });
+        return true;
     }
 
     /// <summary>De-duplicating funnel for both detection paths.</summary>

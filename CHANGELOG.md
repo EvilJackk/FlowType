@@ -4,6 +4,121 @@ All notable changes to FlowType. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/); versions follow
 [SemVer](https://semver.org/).
 
+## [2.1.0] — 2026-10-19
+
+FlowType learns from what you have already written. It has always learned
+from a fix you make right after a dictation; now it can also look back over
+your whole history, all on this PC.
+
+### Added — learn from your writing
+- **Insights → Learn from my history.** Reads your past dictations — FlowType's
+  own History and, if you tick it, Wispr Flow's local history database (opened
+  read-only, never changed or copied) — and suggests:
+  - **words to recognise**: names and terms you use repeatedly that the speech
+    model is unlikely to know. Ranked by how often you use them, whether a
+    recogniser has misheard them, and whether Whisper's own vocabulary already
+    contains them — so the limited prompt space goes to the words that need it.
+    A word that would also rewrite something you really write ("Wispr" would
+    catch "whisper") is offered but never pre-ticked;
+  - **fixes for words it mishears**, from the corrections you made by hand and
+    from Wispr's recogniser errors, judged by the same conservative rules as
+    live learning (never grammar, homophones or everyday words);
+  - your **Wispr Flow dictionary** and snippets;
+  - your **style** per kind of app, when your own edits or your Wispr setting
+    disagree with FlowType's.
+- **"How well FlowType hears you"** (optional, a few minutes on a GPU): decodes
+  your recordings exactly the way a live dictation would, with and without the
+  suggestions, and shows the difference — including how often your suggested
+  words come out right. It pauses whenever you dictate.
+- **A daily check** (Insights, on by default) queues new suggestions and puts a
+  dot on Insights. Optionally it adds new *words* automatically — never rules,
+  never styles.
+- **Undo everything learned** removes every entry added this way and remembers
+  not to suggest them again; deleting one learned entry does the same for it.
+  Learned entries are marked "From history" in Dictionary, and your own entries
+  always keep priority in the recogniser's prompt.
+
+### Fixed
+- The fuzzy dictionary match swallowed a short word in front of a term: "we
+  need an Arma Reforger mod" became "we need Arma Reforger mod", and "I bought
+  a workbench" became "I bought Workbench".
+
+## [2.0.0] — 2026-10-19
+
+The big one. Every change here comes from taking Wispr Flow apart (with
+[REA](https://github.com/morluto/rea), statically, from the copy installed on
+the build machine) and asking, for each thing it does: can this happen on the
+user's own PC instead of on a server? Wispr Flow turned out to do all of its
+speech recognition and formatting in the cloud. FlowType 2.0 does the
+equivalents locally — or not at all.
+
+### Added — on-device AI (optional)
+- **AI polish.** A small open-weights language model (Qwen3 4B, or Qwen2.5 1.5B
+  on lighter machines) runs through llama.cpp on your GPU and cleans up the
+  dictations rules can't: *"move it to Thursday, no wait, Friday"* → *"move it to
+  Friday"*, stutters, spoken lists, long rambles. About half a second on a
+  mid-range GPU. **Smart** mode (default) only uses it when a transcript needs it.
+- **A guard around it.** The model's answer is thrown away — and the
+  rule-formatted text used instead — if it reads like a chatbot reply, answers
+  a question instead of transcribing it, adds words you never said, drops too
+  much, or was cut off. The AI can only make a dictation better or leave it alone.
+- **Command Mode.** Hold the hotkey, press **Alt**, and speak an instruction:
+  *"make this more formal"* rewrites the selected text; with nothing selected,
+  *"reply that I can't make it"* writes at the cursor.
+- Models download once from the publisher's own Hugging Face page and are
+  checked against a pinned SHA-256 before they are ever loaded.
+
+### Added — fits where it lands
+- **Screen context.** The text field you are dictating into is read through
+  Windows UI Automation (locally, never stored, never a password field), so a
+  dictation continues a sentence in lowercase, gets exactly one space on each
+  side, and does not add a full stop when the sentence carries on after the
+  cursor. Replacing a selection mirrors it.
+- **Names on screen are spelled right.** Names and terms already in the field
+  and the window title are added to the recogniser's vocabulary.
+- **Styles.** Formal / Casual / Very casual / Excited, chosen separately for
+  personal messages, work messages, email and everything else.
+
+### Added — faster long dictations
+- **Live transcription.** Past about 20 seconds, the take is transcribed in the
+  background at natural pauses while you are still talking. A 67-second
+  dictation is ready about 0.9 s after you let go instead of 2.6–6.3 s.
+
+### Added — gestures and shortcuts
+- **Space while holding** the hotkey switches to hands-free (and no longer
+  changes your keyboard layout on Ctrl+Win+Space).
+- **Alt+Shift+Z** pastes your last dictation again; **Alt+Shift+X** copies it.
+- Say **"press enter"** at the end to send what you dictated.
+
+### Added — history and audio
+- History is grouped by day, with play, **transcribe again**, copy, delete and
+  undo-AI-edit on every row. The last 30 recordings are kept for that
+  (Settings → Privacy; 0 deletes audio immediately, as before).
+- **Snippets** have their own page; a snippet said on its own replaces the
+  whole dictation.
+- Other apps' music and video are **muted while you dictate** (and always
+  restored, even after a crash).
+- Toasts for a dead microphone (silence while you talk) and a newly plugged-in one.
+
+### Changed
+- **New UI.** Home with history, Insights, Dictionary, Snippets, Style, AI and
+  Settings pages, and a redesigned flow bar with hands-free ✕/■ buttons, a
+  Command Mode look, and toasts that grow out of the pill.
+- Dictations no longer appear in **Win+V clipboard history** or the cloud
+  clipboard.
+- Pasting into an app running as administrator (which Windows silently blocks)
+  now copies the text and tells you why.
+- Long dictations into **Claude Code / Codex / Gemini CLI** in a terminal are
+  pasted in pieces so the text shows instead of a "[Pasted text]" placeholder.
+- Learning from your edits also re-reads the field after a paste, and no longer
+  learns plurals, tenses or homophones as rewrite rules.
+
+### Fixed
+- With the Ctrl+Shift+Space hotkey, every Space keystroke was swallowed system-wide.
+- A quick RightCtrl+C could open a hands-free take.
+- Unplugging the microphone mid-take lost the whole take.
+- A late mic-test callback could empty the next dictation.
+
 ## [1.6.0] — 2026-09-10
 
 Dictation that comes out looking like writing, and a page that shows you what

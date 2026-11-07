@@ -286,12 +286,90 @@ public sealed class Transcriber
     /// local equivalent of Wispr Flow's dictionary-aware "name spelling".
     /// <paramref name="accurate"/> overrides the Settings decoding mode (used
     /// by the benchmark); null follows the user's setting.
+    ///
+    /// Reads the file and hands the samples to
+    /// <see cref="TranscribeSamplesAsync"/>, so the whole-file path and the
+    /// live (chunked) path decode through exactly the same code.
+    /// <paramref name="previousText"/> defaults to none, which is the
+    /// historical behaviour; a caller retrying an unpunctuated result passes
+    /// <see cref="PunctuationPrimer"/> (see <see cref="LooksUnpunctuated"/>).
     /// </summary>
     public async Task<Transcription> TranscribeAsync(
         string wavPath, string language, IReadOnlyList<string> vocabulary,
         CancellationToken ct = default, bool? accurate = null,
-        IReadOnlyList<string>? spokenForms = null)
+        IReadOnlyList<string>? spokenForms = null, string? previousText = null)
     {
+        // Same error, same order as before the split: with no model there is
+        // nothing to read the file for.
+        if (_factory == null) throw new InvalidOperationException("No AI model loaded yet.");
+
+        // Off the caller's thread — the session awaits this from the UI thread,
+        // and a long hands-free take is tens of megabytes of WAV.
+        var samples = await Task.Run(() => ReadSamples(wavPath), ct);
+        return await TranscribeSamplesAsync(samples, language, vocabulary, ct, accurate, spokenForms, previousText);
+    }
+
+    /// <summary>
+    /// Words below which a missing full stop is unremarkable ("ok sounds good").
+    /// </summary>
+    internal const int UnpunctuatedMinWords = 15;
+
+    /// <summary>
+    /// whisper large-v3 — q5_0 and turbo alike — has an "unpunctuated mode":
+    /// with beam search, some takes come back as one long lowercase run with no
+    /// sentence punctuation at all. Measured 2026-10-19 on a 67 s synthetic
+    /// dictation with the user's own configuration (large-v3-q5_0, accurate,
+    /// US variant prompt): the whole-file decode came back with zero full
+    /// stops in 210 words, in three runs out of three (2.6–6.3 s each); the
+    /// same audio in live chunks came back fully punctuated, and a whole-file
+    /// retry with <see cref="PunctuationPrimer"/> did too (13 full stops). Also reproduced on 0–22.0 s slices of another
+    /// take with both models, while 0–23.5 s and 0–30 s of the same audio were
+    /// fine — it is a property of the exact input, not of length.
+    /// True for text of at least <see cref="UnpunctuatedMinWords"/> words
+    /// with no '.', '!' or '?' anywhere.
+    /// </summary>
+    public static bool LooksUnpunctuated(string text) =>
+        !text.Any(c => c is '.' or '!' or '?')
+        && text.Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries).Length >= UnpunctuatedMinWords;
+
+    /// <summary>
+    /// A neutral, punctuated "previous text" that pulls whisper back out of
+    /// the unpunctuated mode — the decoder continues the style of its prompt.
+    /// Verified on every failing slice above, both models, beam search. It is
+    /// prompt text, so the echo guard strips it if it is ever repeated back.
+    /// </summary>
+    public const string PunctuationPrimer = "Okay. So, here it is, with full punctuation.";
+
+    /// <summary>
+    /// Transcribe 16 kHz mono float samples (−1..1). This is the one decode
+    /// path: <see cref="TranscribeAsync"/> is a file read in front of it.
+    ///
+    /// <paramref name="previousText"/> is what was said just before this audio
+    /// — the live transcriber passes the tail of the previous chunk's text so a
+    /// sentence that continues across a cut keeps its casing, spelling and
+    /// punctuation style. It goes into the initial prompt (see
+    /// <see cref="BuildPrompt"/>). It is not given to the four-word echo
+    /// guard, which is built for sentences nobody says and would delete real
+    /// speech that reuses the previous chunk's wording; a decoder that repeats
+    /// the end of it instead of listening is caught by
+    /// <see cref="StripContinuationEcho"/>. <see cref="PunctuationPrimer"/>
+    /// as previous text is the exception: it is a fixed sentence the speaker
+    /// never says, so it does go to the echo guard.
+    ///
+    /// <paramref name="skipConditioning"/> is for a caller that has already
+    /// conditioned the audio itself (the live transcriber filters the whole
+    /// take as one stream so chunk edges match the whole-file result). The
+    /// samples are then decoded as given — only padded up to whisper.cpp's
+    /// one-second floor — and the verdict is <see cref="TakeVerdict.Uncertain"/>
+    /// with empty metrics: judging the take is the caller's job on that path.
+    /// </summary>
+    public async Task<Transcription> TranscribeSamplesAsync(
+        float[] samples16k, string language, IReadOnlyList<string> vocabulary,
+        CancellationToken ct = default, bool? accurate = null,
+        IReadOnlyList<string>? spokenForms = null, string? previousText = null,
+        bool skipConditioning = false)
+    {
+        ArgumentNullException.ThrowIfNull(samples16k);
         await _lock.WaitAsync(ct);
         var factory = _factory;
         if (factory == null)
@@ -300,12 +378,14 @@ public sealed class Transcriber
             throw new InvalidOperationException("No AI model loaded yet.");
         }
         IsTranscribing = true;
-        StateChanged?.Invoke();
+        RaiseStateChanged();
         try
         {
             return await Task.Run(async () =>
             {
-                var take = AudioConditioner.Prepare(ReadSamples(wavPath));
+                var take = skipConditioning
+                    ? Unconditioned(samples16k)
+                    : AudioConditioner.Prepare(samples16k);
                 var samples = take.Samples;
                 if (samples.Length == 0)
                 {
@@ -331,7 +411,7 @@ public sealed class Transcriber
                 // sample text biases spelling, the user's dictionary words make
                 // uncommon names/terms far likelier to be recognized.
                 var variantPrompt = EnglishVariant.RecognitionPrompt(settings.EnglishVariant);
-                var prompt = BuildPrompt(variantPrompt, vocabulary, spokenForms);
+                var prompt = BuildPrompt(variantPrompt, vocabulary, spokenForms, previousText);
                 if (prompt != null) builder = builder.WithPrompt(prompt);
 
                 // Decoding. Temperature fallback (the reference implementation's
@@ -391,8 +471,21 @@ public sealed class Transcriber
                 var promptTerms = spokenForms is { Count: > 0 }
                     ? vocabulary.Concat(spokenForms).ToList()
                     : vocabulary;
+                // The four-word echo rule is for sentences the speaker never
+                // says: the variant sentence, and the punctuation primer when
+                // that is the "previous text". A live chunk's previous text is
+                // what the speaker really said, and reusing four of its words
+                // in a row is ordinary speech ("…the error rate has stayed
+                // flat" → "the error rate has stayed flat since Monday"), so
+                // it gets only the narrow continuation check below.
+                var primed = string.Equals(previousText, PunctuationPrimer, StringComparison.Ordinal);
+                var echoSource = primed ? JoinNonEmpty(variantPrompt, PunctuationPrimer) : variantPrompt;
                 var text = HallucinationFilter.Apply(
-                    CleanNonSpeechMarkers(sb.ToString()), variantPrompt, promptTerms);
+                    CleanNonSpeechMarkers(sb.ToString()), echoSource, promptTerms);
+                if (!primed)
+                {
+                    text = StripContinuationEcho(text, PreviousContext(previousText, MaxPreviousTextChars));
+                }
                 return new Transcription(text, take.Verdict, take.Metrics, decoded);
             }, ct);
         }
@@ -400,8 +493,82 @@ public sealed class Transcriber
         {
             IsTranscribing = false;
             _lock.Release();
-            StateChanged?.Invoke();
+            RaiseStateChanged();
         }
+    }
+
+    /// <summary>
+    /// The live path decodes on a worker thread, so a UI subscriber that
+    /// forgot to marshal would throw here — and that must cost a status
+    /// refresh, not the transcription.
+    /// </summary>
+    private void RaiseStateChanged()
+    {
+        try { StateChanged?.Invoke(); }
+        catch { }
+    }
+
+    /// <summary>
+    /// Pre-conditioned samples, only lengthened to the 1.25 s that
+    /// <see cref="AudioConditioner"/> guarantees: whisper.cpp returns nothing at
+    /// all for input under one second.
+    /// </summary>
+    private static ConditionedTake Unconditioned(float[] samples)
+    {
+        if (samples.Length == 0)
+        {
+            return new ConditionedTake(samples, TakeVerdict.NoInput, default);
+        }
+        var minimum = (int)(1.25 * AudioConditioner.SampleRate);
+        var padded = samples.Length >= minimum ? samples : samples.Concat(new float[minimum - samples.Length]).ToArray();
+        var metrics = new TakeMetrics(0, 0, 0, 0, false, false, 1f,
+            InputMs: (int)(samples.Length * 1000L / AudioConditioner.SampleRate), TrimmedMs: 0);
+        return new ConditionedTake(padded, TakeVerdict.Uncertain, metrics);
+    }
+
+    private static string? JoinNonEmpty(string? a, string? b)
+    {
+        var hasA = !string.IsNullOrWhiteSpace(a);
+        var hasB = !string.IsNullOrWhiteSpace(b);
+        if (hasA && hasB) return a!.Trim() + " " + b!.Trim();
+        return hasA ? a : hasB ? b : a;
+    }
+
+    /// <summary>Below this many words, repeating the end of the previous chunk is plausible speech.</summary>
+    internal const int MinContinuationEchoWords = 5;
+
+    /// <summary>
+    /// The one shape of prompt echo a live chunk's real previous text can
+    /// produce: the decoder, not hearing the start of its audio, repeats the
+    /// end of its prompt word for word before it starts listening. Drops the
+    /// chunk's leading sentence(s) only when, together, their words are
+    /// exactly the last words of <paramref name="previousContext"/> (at least
+    /// <see cref="MinContinuationEchoWords"/>, compared case- and
+    /// punctuation-blind). A sentence later in the chunk, or one that only
+    /// shares a phrase with what came before, is never touched — a speaker
+    /// reuses their own wording all the time. The live joiner's duplicate-
+    /// sentence pass still catches a verbatim repeat across the seam.
+    /// </summary>
+    internal static string StripContinuationEcho(string text, string? previousContext)
+    {
+        if (string.IsNullOrWhiteSpace(text) || string.IsNullOrWhiteSpace(previousContext)) return text;
+        var previous = WordErrorRate.Normalize(previousContext);
+        if (previous.Length < MinContinuationEchoWords) return text;
+
+        var sentences = Regex.Split(text.Trim(), @"(?<=[.!?])\s+").Where(s => s.Length > 0).ToList();
+        var lead = new List<string>();
+        var drop = 0;
+        for (var i = 0; i < sentences.Count; i++)
+        {
+            lead.AddRange(WordErrorRate.Normalize(sentences[i]));
+            if (lead.Count > previous.Length) break;
+            if (lead.Count >= MinContinuationEchoWords
+                && previous.Skip(previous.Length - lead.Count).SequenceEqual(lead, StringComparer.Ordinal))
+            {
+                drop = i + 1;
+            }
+        }
+        return drop == 0 ? text : string.Join(" ", sentences.Skip(drop)).Trim();
     }
 
     /// <summary>
@@ -483,6 +650,17 @@ public sealed class Transcriber
     internal const int MaxPromptChars = 900;
 
     /// <summary>
+    /// How much of the previous chunk's text a live chunk is prompted with.
+    /// About two sentences: enough to carry casing, spelling and an unfinished
+    /// sentence across a cut, short enough that the user's dictionary keeps
+    /// most of the 900-character budget.
+    /// </summary>
+    internal const int MaxPreviousTextChars = 200;
+
+    /// <summary>Below this, a context fragment is a few words with no sentence to continue.</summary>
+    private const int MinPreviousTextChars = 20;
+
+    /// <summary>
     /// Compose the decoder's initial prompt. Naming the two roles explicitly
     /// conditions the model better than a bare comma list, because the prompt is
     /// continued as text: a labelled list reads as a glossary rather than as the
@@ -492,9 +670,17 @@ public sealed class Transcriber
     /// of an over-long prompt, so the section that must survive goes last — the
     /// spellings, which are what the user actually wants written. Spoken forms
     /// are the hint about how the model mishears them; useful, but expendable.
+    ///
+    /// <paramref name="previousText"/> (live chunks only) is rendered straight
+    /// after the variant sentence and before both dictionary sections, and is
+    /// budgeted after the spellings but before the spoken forms: losing the
+    /// sentence that was just spoken costs more than losing a mishearing hint,
+    /// but never more than a spelling the user asked for. With no previous text
+    /// the prompt is byte-identical to what it was before live transcription.
     /// </summary>
     internal static string? BuildPrompt(string? variantPrompt,
-        IReadOnlyList<string> spellings, IReadOnlyList<string>? spokenForms = null)
+        IReadOnlyList<string> spellings, IReadOnlyList<string>? spokenForms = null,
+        string? previousText = null)
     {
         var budget = MaxPromptChars;
         var variant = string.IsNullOrWhiteSpace(variantPrompt) ? null : variantPrompt!.Trim();
@@ -502,10 +688,13 @@ public sealed class Transcriber
 
         // Spellings are budgeted first even though they are rendered last.
         var spellingSection = Section("Preferred spellings", spellings, ref budget);
+        var context = PreviousContext(previousText, Math.Min(MaxPreviousTextChars, budget - 1));
+        if (context != null) budget -= context.Length + 1;
         var spokenSection = Section("Possible spoken forms", spokenForms, ref budget);
 
         var parts = new List<string>();
         if (variant != null) parts.Add(variant);
+        if (context != null) parts.Add(context);
         if (spokenSection != null) parts.Add(spokenSection);
         if (spellingSection != null) parts.Add(spellingSection);
 
@@ -538,6 +727,33 @@ public sealed class Transcriber
         var section = $"{label}: {string.Join(", ", kept)}.";
         budget -= section.Length + 1;
         return section;
+    }
+
+    /// <summary>
+    /// The last <paramref name="maxChars"/> characters of what was said
+    /// before, starting on a word boundary, as one clean line: the paragraph
+    /// marker and any control characters become spaces (the marker is a
+    /// private-use character the model has never seen). Null when there is
+    /// too little room or too little text to be worth a prompt slot.
+    /// </summary>
+    internal static string? PreviousContext(string? previousText, int maxChars)
+    {
+        if (string.IsNullOrWhiteSpace(previousText) || maxChars < MinPreviousTextChars) return null;
+        var clean = SanitizeTerm(previousText.Replace(SmartFormatter.ParagraphMark, ' '));
+        if (clean.Length > maxChars)
+        {
+            var tail = clean[^maxChars..];
+            // Drop a partial first word: half a word reads to the model as a
+            // different, misspelled one.
+            if (clean[^(maxChars + 1)] != ' ')
+            {
+                var space = tail.IndexOf(' ');
+                tail = space >= 0 ? tail[(space + 1)..] : "";
+            }
+            clean = tail;
+        }
+        clean = clean.Trim();
+        return clean.Length >= MinPreviousTextChars ? clean : null;
     }
 
     /// <summary>

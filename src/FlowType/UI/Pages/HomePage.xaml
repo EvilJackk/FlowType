@@ -1,0 +1,131 @@
+<UserControl x:Class="FlowType.UI.Pages.HomePage"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <ScrollViewer x:Name="Scroller" VerticalScrollBarVisibility="Auto" Focusable="False">
+        <StackPanel x:Name="Body" Style="{StaticResource PageBody}">
+
+            <!-- Greeting -->
+            <TextBlock x:Name="GreetingText" Style="{StaticResource PageTitle}" Text="Good evening"
+                       Margin="0"/>
+            <TextBlock x:Name="HomeHintText" Style="{StaticResource PageSubtitle}"/>
+
+            <!-- Shown only when there is nothing to transcribe with. -->
+            <Border x:Name="SetupBanner" Style="{StaticResource Card}" Visibility="Collapsed"
+                    BorderBrush="{StaticResource AccentLineBrush}" Background="#1F1D19">
+                <DockPanel>
+                    <Button DockPanel.Dock="Right" Style="{StaticResource AccentButton}"
+                            Content="Choose a model" VerticalAlignment="Center"
+                            Click="GoToSettings_Click"/>
+                    <StackPanel Margin="0,0,20,0">
+                        <TextBlock Style="{StaticResource SectionTitle}" x:Name="SetupTitle"
+                                   Text="Pick a speech model to start"/>
+                        <TextBlock Style="{StaticResource Hint}" x:Name="SetupHint" Margin="0,4,0,0"
+                                   Text="FlowType transcribes on this PC, so it needs a model downloaded once. It takes a minute."/>
+                    </StackPanel>
+                </DockPanel>
+            </Border>
+
+            <!-- Stats strip -->
+            <Border Style="{StaticResource Card}" Padding="0">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Grid.Column="0" Margin="24,20,16,20">
+                        <TextBlock x:Name="StatWords" Style="{StaticResource StatValue}" Text="0"/>
+                        <TextBlock Style="{StaticResource Hint}" Text="words in the last 7 days" Margin="0,2,0,0"/>
+                    </StackPanel>
+                    <Border Grid.Column="1" BorderBrush="{StaticResource StrokeBrush}" BorderThickness="1,0,0,0">
+                        <StackPanel Margin="24,20,16,20">
+                            <TextBlock x:Name="StatWpm" Style="{StaticResource StatValue}" Text="—"/>
+                            <TextBlock Style="{StaticResource Hint}" Text="words per minute" Margin="0,2,0,0"/>
+                        </StackPanel>
+                    </Border>
+                    <Border Grid.Column="2" BorderBrush="{StaticResource StrokeBrush}" BorderThickness="1,0,0,0">
+                        <StackPanel Margin="24,20,16,20">
+                            <TextBlock x:Name="StatStreak" Style="{StaticResource StatValue}" Text="0"/>
+                            <TextBlock x:Name="StatStreakLabel" Style="{StaticResource Hint}" Text="day streak" Margin="0,2,0,0"/>
+                        </StackPanel>
+                    </Border>
+                    <Border Grid.Column="3" BorderBrush="{StaticResource StrokeBrush}" BorderThickness="1,0,0,0">
+                        <StackPanel Margin="24,20,16,20">
+                            <TextBlock x:Name="StatFixes" Style="{StaticResource StatValue}" Text="0"/>
+                            <TextBlock Style="{StaticResource Hint}" Text="fixes made for you" Margin="0,2,0,0"/>
+                        </StackPanel>
+                    </Border>
+                </Grid>
+            </Border>
+
+            <!-- Practice box, folded away once you're a regular. -->
+            <Border Style="{StaticResource Card}" Padding="20,14,14,14">
+                <StackPanel>
+                    <DockPanel>
+                        <Button x:Name="TryToggle" DockPanel.Dock="Right" Style="{StaticResource ChipButton}"
+                                Content="Open" Click="TryToggle_Click" VerticalAlignment="Center"/>
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <TextBlock Style="{StaticResource SectionTitle}" Text="Try it here" FontSize="15"
+                                       VerticalAlignment="Center"/>
+                            <TextBlock x:Name="TryHintText" Style="{StaticResource Hint}" TextWrapping="NoWrap"
+                                       TextTrimming="CharacterEllipsis" Margin="12,0,0,0"
+                                       VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </DockPanel>
+                    <TextBox x:Name="PracticeBox" Height="116" AcceptsReturn="True" Margin="0,12,6,4"
+                             TextWrapping="Wrap" VerticalContentAlignment="Top" FontSize="15"
+                             VerticalScrollBarVisibility="Auto" Visibility="Collapsed"
+                             Tag="Click here, hold your hotkey and say something…"/>
+                </StackPanel>
+            </Border>
+
+            <!-- History -->
+            <Grid Margin="0,22,0,14">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+                <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Style="{StaticResource SectionHeading}" Text="History"/>
+                    <TextBlock x:Name="HistoryCountText" Style="{StaticResource Hint}" Margin="12,4,0,0"
+                               VerticalAlignment="Center"/>
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <TextBox x:Name="NotesSearchBox" Style="{StaticResource SearchBox}" Width="250"
+                             Tag="Search history" TextChanged="NotesSearch_TextChanged"
+                             AutomationProperties.Name="Search history"/>
+                    <Button Style="{StaticResource GhostButton}" Margin="8,0,0,0"
+                            Click="ExportNotes_Click" ToolTip="Save every dictation to a text file">
+                        <StackPanel Orientation="Horizontal">
+                            <Path Style="{StaticResource IconPath}" Data="{StaticResource IconExport}"
+                                  Stroke="{StaticResource SoftTextBrush}" Margin="-4,-4,4,-4">
+                                <Path.LayoutTransform>
+                                    <ScaleTransform ScaleX="0.85" ScaleY="0.85"/>
+                                </Path.LayoutTransform>
+                            </Path>
+                            <TextBlock Text="Export" VerticalAlignment="Center"/>
+                        </StackPanel>
+                    </Button>
+                    <Button Style="{StaticResource DangerButton}" Content="Clear all" Margin="8,0,0,0"
+                            Click="ClearNotes_Click"/>
+                </StackPanel>
+            </Grid>
+
+            <Border x:Name="NotesEmpty" Style="{StaticResource Card}" Padding="28,30" Visibility="Collapsed">
+                <StackPanel HorizontalAlignment="Center">
+                    <TextBlock x:Name="NotesEmptyTitle" Style="{StaticResource SectionTitle}"
+                               HorizontalAlignment="Center" Text="Nothing here yet"/>
+                    <TextBlock x:Name="NotesEmptyText" Style="{StaticResource Hint}" Margin="0,6,0,0"
+                               TextAlignment="Center" MaxWidth="460"
+                               Text="Everything you dictate lands here, grouped by day — searchable, and kept only on this PC."/>
+                </StackPanel>
+            </Border>
+
+            <StackPanel x:Name="NotesList"/>
+
+            <Button x:Name="ShowMoreButton" Style="{StaticResource GhostButton}" HorizontalAlignment="Center"
+                    Margin="0,6,0,0" Visibility="Collapsed" Click="ShowMore_Click"/>
+        </StackPanel>
+    </ScrollViewer>
+</UserControl>

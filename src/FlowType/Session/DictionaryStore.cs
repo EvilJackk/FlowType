@@ -25,6 +25,23 @@ public class DictionaryEntry
     public bool LearnedFromCorrection { get; set; }
 
     /// <summary>
+    /// Added by "Learn from your writing" (2.1) after the user approved it, or
+    /// automatically when they allowed words to be added. Tagged so that
+    /// everything the feature ever added can be removed in one step
+    /// (<see cref="DictionaryStore.RemoveLearnedFromHistory"/>) without
+    /// touching anything the user wrote themselves. Editing the entry's text by
+    /// hand clears it: from then on the entry is the user's.
+    /// </summary>
+    public bool LearnedFromHistory { get; set; }
+
+    /// <summary>
+    /// A voice shortcut ("my calendar link" → the URL; "sign off" → a whole
+    /// signature). Listed on its own tab, and when it is the entire dictation
+    /// the expansion replaces everything, including the full stop whisper adds.
+    /// </summary>
+    public bool IsSnippet { get; set; }
+
+    /// <summary>
     /// Empty means "just a word to recognise". Deliberately not
     /// IsNullOrWhiteSpace: a replacement of a single space is the most useful
     /// rule a dictation user writes ("-" → " " to undo hyphenation), and
@@ -104,28 +121,36 @@ public sealed class DictionaryStore
             && text.Any(char.IsLetter)
             && !text.Contains('@') && !text.Contains("://");
 
-        foreach (var e in entries.Where(e => e.Enabled && e.IsVocabularyOnly))
+        // The user's own entries are spent from the prompt budget before
+        // anything "Learn from your writing" added (2.1), so a batch of
+        // learned words can never push out a term the user typed in — the
+        // prompt keeps a prefix of each list. With no learned entries this is
+        // the original single pass, in the original order.
+        foreach (var group in new[] { entries.Where(e => !e.LearnedFromHistory), entries.Where(e => e.LearnedFromHistory) })
         {
-            var phrase = Transcriber.SanitizeTerm(e.Phrase);
-            if (IsShortName(phrase) && seenSpelling.Add(phrase)) spellings.Add(phrase);
-        }
-        foreach (var e in entries.Where(e => e.Enabled && !e.IsVocabularyOnly))
-        {
-            var target = Transcriber.SanitizeTerm(e.Replacement);
-            var phrase = Transcriber.SanitizeTerm(e.Phrase);
-            var targetIsTerm = IsShortName(target);
-            if (targetIsTerm && seenSpelling.Add(target)) spellings.Add(target);
-
-            // "How it gets heard" is only worth telling the decoder when
-            // the thing being heard is a term we are biasing toward. A
-            // snippet trigger ("my email" → an address) is a phrase the
-            // user says on purpose, not a mis-hearing, and a casing-only
-            // rule teaches the decoder nothing at all.
-            if (targetIsTerm && IsShortName(phrase)
-                && !phrase.Equals(target, StringComparison.OrdinalIgnoreCase)
-                && seenSpoken.Add(phrase))
+            foreach (var e in group.Where(e => e.Enabled && e.IsVocabularyOnly))
             {
-                spoken.Add(phrase);
+                var phrase = Transcriber.SanitizeTerm(e.Phrase);
+                if (IsShortName(phrase) && seenSpelling.Add(phrase)) spellings.Add(phrase);
+            }
+            foreach (var e in group.Where(e => e.Enabled && !e.IsVocabularyOnly))
+            {
+                var target = Transcriber.SanitizeTerm(e.Replacement);
+                var phrase = Transcriber.SanitizeTerm(e.Phrase);
+                var targetIsTerm = IsShortName(target);
+                if (targetIsTerm && seenSpelling.Add(target)) spellings.Add(target);
+
+                // "How it gets heard" is only worth telling the decoder when
+                // the thing being heard is a term we are biasing toward. A
+                // snippet trigger ("my email" → an address) is a phrase the
+                // user says on purpose, not a mis-hearing, and a casing-only
+                // rule teaches the decoder nothing at all.
+                if (targetIsTerm && IsShortName(phrase)
+                    && !phrase.Equals(target, StringComparison.OrdinalIgnoreCase)
+                    && seenSpoken.Add(phrase))
+                {
+                    spoken.Add(phrase);
+                }
             }
         }
         return new VocabularyLists(spellings, spoken);
@@ -169,7 +194,7 @@ public sealed class DictionaryStore
         return list;
     }
 
-    public void Add(string phrase, string replacement, bool matchWholeWord = true)
+    public void Add(string phrase, string replacement, bool matchWholeWord = true, bool isSnippet = false)
     {
         lock (_gate)
         {
@@ -178,11 +203,72 @@ public sealed class DictionaryStore
                 Phrase = phrase,
                 Replacement = replacement,
                 MatchWholeWord = matchWholeWord,
+                IsSnippet = isSnippet,
             });
             Save();
         }
         Changed?.Invoke();
     }
+
+    /// <summary>Edit an entry in place (the dictionary and snippet editors).</summary>
+    public void Update(Guid id, string phrase, string replacement)
+    {
+        lock (_gate)
+        {
+            var entry = _entries.FirstOrDefault(e => e.Id == id);
+            if (entry == null) return;
+            ApplyEdit(entry, phrase, replacement);
+            Save();
+        }
+        Changed?.Invoke();
+    }
+
+    /// <summary>
+    /// The field changes behind <see cref="Update"/>. Pure, so --selftest can
+    /// check it without touching the user's dictionary.
+    ///
+    /// A hand edit makes a learned entry the user's own: the
+    /// <see cref="DictionaryEntry.LearnedFromHistory"/> tag is cleared when the
+    /// text actually changes, so "Undo everything learned" keeps the edit (the
+    /// undo dialog promises that what the user wrote is kept) and the entry
+    /// moves into the user's half of the prompt budget. Saving an editor with
+    /// nothing changed keeps the tag, so opening one by accident does not take
+    /// an entry out of the undo.
+    /// </summary>
+    internal static void ApplyEdit(DictionaryEntry entry, string phrase, string replacement)
+    {
+        if (!string.Equals(entry.Phrase, phrase, StringComparison.Ordinal)
+            || !string.Equals(entry.Replacement, replacement, StringComparison.Ordinal))
+        {
+            entry.LearnedFromHistory = false;
+        }
+        entry.Phrase = phrase;
+        entry.Replacement = replacement;
+    }
+
+    /// <summary>
+    /// A snippet spoken on its own: "My calendar link." → the link, with no
+    /// stray full stop and no capital-letter fixups around it. Compared with
+    /// punctuation and spacing stripped, so whisper's punctuation never decides
+    /// whether a snippet fires.
+    /// </summary>
+    public string? WholeUtteranceSnippet(string transcript)
+    {
+        var key = SnippetKey(transcript);
+        if (key.Length == 0) return null;
+        lock (_gate)
+        {
+            foreach (var e in _entries)
+            {
+                if (!e.Enabled || !e.IsSnippet || e.IsVocabularyOnly) continue;
+                if (SnippetKey(e.Phrase) == key) return e.Replacement;
+            }
+        }
+        return null;
+    }
+
+    private static string SnippetKey(string s) =>
+        new string(s.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
 
     /// <summary>
     /// Add a rule that came from the user correcting FlowType by hand. Returns
@@ -209,6 +295,142 @@ public sealed class DictionaryStore
         }
         Changed?.Invoke();
         return true;
+    }
+
+    // ----- Learned from history (2.1) -----
+
+    /// <summary>
+    /// Add entries the user approved in "Learn from your writing" (or that a
+    /// background run added with their permission). Returns how many were new.
+    ///
+    /// Appended, not inserted at the top like <see cref="Add"/>: the order of
+    /// the list is the order spellings are spent from the decoder's
+    /// 900-character prompt budget, and a batch of forty learned words must
+    /// never push out a term the user typed in by hand. One save and one
+    /// <see cref="Changed"/> for the whole batch, because the caller is the UI
+    /// thread and every Changed redraws the Dictionary page.
+    /// </summary>
+    public int AddFromHistory(IEnumerable<(string Phrase, string Replacement, bool IsSnippet)> items) =>
+        AddFromHistoryEntries(items).Count;
+
+    /// <summary><see cref="AddFromHistory"/>, returning the entries actually added (for per-kind counts).</summary>
+    internal IReadOnlyList<DictionaryEntry> AddFromHistoryEntries(
+        IEnumerable<(string Phrase, string Replacement, bool IsSnippet)> items)
+    {
+        ArgumentNullException.ThrowIfNull(items);
+        var batch = items.ToList();
+        List<DictionaryEntry> added;
+        lock (_gate)
+        {
+            added = PlanFromHistory(_entries, batch);
+            if (added.Count == 0) return added;
+            _entries.AddRange(added);
+            Save();
+        }
+        Changed?.Invoke();
+        return added;
+    }
+
+    /// <summary>
+    /// Which of <paramref name="items"/> are new, in the order given, as the
+    /// entries <see cref="AddFromHistory"/> would append. Pure, so --selftest
+    /// can check the rules without touching the user's dictionary.
+    ///
+    /// Already present means:
+    /// <list type="bullet">
+    /// <item>a word (empty replacement) that the dictionary already gives the
+    /// decoder as a spelling — a vocabulary entry, or the target of a rewrite
+    /// rule, compared case-insensitively. A second copy would only spend
+    /// prompt budget twice; the user's own casing stays.</item>
+    /// <item>a rule or snippet whose spoken phrase already has a rule. Two
+    /// rules for one phrase is not a choice: <see cref="ApplyRules"/> resolves
+    /// the tie by list order, so an appended one could never fire.</item>
+    /// </list>
+    /// Disabled entries count as present: the user switched that one off, and
+    /// learning it again would quietly overrule them. Blank phrases and rules
+    /// that rewrite a phrase to exactly itself are skipped.
+    /// </summary>
+    internal static List<DictionaryEntry> PlanFromHistory(
+        IReadOnlyList<DictionaryEntry> existing,
+        IEnumerable<(string Phrase, string Replacement, bool IsSnippet)> items)
+    {
+        var spellings = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var rulePhrases = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var e in existing)
+        {
+            if (e.IsVocabularyOnly) spellings.Add(e.Phrase.Trim());
+            else
+            {
+                rulePhrases.Add(e.Phrase.Trim());
+                if (e.Replacement.Trim().Length > 0) spellings.Add(e.Replacement.Trim());
+            }
+        }
+
+        var planned = new List<DictionaryEntry>();
+        foreach (var (rawPhrase, rawReplacement, isSnippet) in items)
+        {
+            var phrase = (rawPhrase ?? "").Trim();
+            if (phrase.Length == 0) continue;
+            // A replacement of whitespace is a real rule ("-" → " "), so only
+            // a replacement with text in it is trimmed.
+            var replacement = rawReplacement ?? "";
+            if (replacement.Trim().Length > 0) replacement = replacement.Trim();
+
+            if (replacement.Length == 0)
+            {
+                if (!spellings.Add(phrase)) continue;
+            }
+            else
+            {
+                if (string.Equals(phrase, replacement, StringComparison.Ordinal)) continue;
+                if (!rulePhrases.Add(phrase)) continue;
+                if (replacement.Trim().Length > 0) spellings.Add(replacement);
+            }
+
+            planned.Add(new DictionaryEntry
+            {
+                Phrase = phrase,
+                Replacement = replacement,
+                MatchWholeWord = true,
+                IsSnippet = isSnippet && replacement.Length > 0,
+                LearnedFromHistory = true,
+            });
+        }
+        return planned;
+    }
+
+    /// <summary>
+    /// Remove every entry "Learn from your writing" added — the one-click undo.
+    /// Entries the user added or edited by hand are not tagged and stay
+    /// (<see cref="ApplyEdit"/> clears the tag on an edit). Returns how many
+    /// were removed.
+    /// </summary>
+    public int RemoveLearnedFromHistory() => RemoveLearnedFromHistoryEntries().Count;
+
+    /// <summary>
+    /// <see cref="RemoveLearnedFromHistory"/>, returning the entries removed, so
+    /// the learner can remember them as "don't suggest again" — otherwise the
+    /// next daily run would find the same words in the same history and put
+    /// them straight back.
+    /// </summary>
+    internal IReadOnlyList<DictionaryEntry> RemoveLearnedFromHistoryEntries()
+    {
+        List<DictionaryEntry> removed;
+        lock (_gate)
+        {
+            removed = _entries.Where(e => e.LearnedFromHistory).ToList();
+            if (removed.Count == 0) return removed;
+            _entries.RemoveAll(e => e.LearnedFromHistory);
+            Save();
+        }
+        Changed?.Invoke();
+        return removed;
+    }
+
+    /// <summary>How many entries came from "Learn from your writing" (the undo link's count).</summary>
+    public int LearnedFromHistoryCount
+    {
+        get { lock (_gate) return _entries.Count(e => e.LearnedFromHistory); }
     }
 
     public void SetEnabled(Guid id, bool enabled)
